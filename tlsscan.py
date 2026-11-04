@@ -1,0 +1,492 @@
+#!/usr/bin/env python3
+"""
+ip:port listesini tarar; TLS/SSL sürümlerini ve cipher'ları, SSH algoritmalarını
+ve RDP şifreleme bilgisini nmap NSE scriptleriyle çıkarır.
+
+Kullanım:
+    python3 tlsscan.py -i targets.txt -o sonuc.csv -t 10
+
+targets.txt formatı (her satır bir hedef, # ile yorum):
+    10.0.0.5:443
+    10.0.0.6:22
+    [2001:db8::1]:8443
+"""
+import argparse
+import csv
+import ipaddress
+import json
+import re
+import shutil
+import subprocess
+import tempfile
+import sys
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+NSE_SCRIPTS = "ssl-enum-ciphers,ssl-cert,ssl-dh-params,ssh2-enum-algos,rdp-enum-encryption"
+
+# Zayıf kabul edilen desenler (rapor için işaretleme)
+WEAK_TLS_VERSIONS = {"SSLv2", "SSLv3", "TLSv1.0", "TLSv1.1"}
+WEAK_TLS_CIPHER = re.compile(r"NULL|EXPORT|anon|RC4|DES|MD5|IDEA|RC2", re.I)
+WEAK_SSH = re.compile(
+    r"(^|-)cbc|arcfour|3des|blowfish|cast128|hmac-md5|hmac-sha1-96|umac-64(?!-etm)|"
+    r"diffie-hellman-group1-|diffie-hellman-group14-sha1|diffie-hellman-group-exchange-sha1|"
+    r"gss-.*sha1|^ssh-dss|^none$",
+    re.I,
+)
+
+FIELDS = ["target", "service", "protocol", "version", "category", "algorithm",
+          "detail", "weak", "verified"]
+
+
+def parse_target(line):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    m = re.match(r"^\[(.+)\]:(\d+)$", line) or re.match(r"^([^:\s]+):(\d+)$", line)
+    if not m:
+        print(f"[!] Geçersiz satır atlandı: {line}", file=sys.stderr)
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def run_nmap(host, port, timeout):
+    try:
+        ipaddress.ip_address(host)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    # -n hostname hedeflerde SNI'yi bozuyor (yanlış/varsayılan sertifika döner),
+    # bu yüzden sadece IP hedeflerde kullanılıyor.
+    cmd = ["nmap", "-Pn", "-sT", "-sV", "--version-light", "-p", str(port),
+           "--script", NSE_SCRIPTS, "--script-args", "vulns.showall",
+           "--script-timeout", f"{timeout}s", "-oX", "-"]
+    if is_ip:
+        cmd.insert(1, "-n")
+    if ":" in host:
+        cmd.insert(1, "-6")
+    cmd.append(host)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout * 3 + 60)
+    return proc.stdout
+
+
+def elem_text(table, key):
+    e = table.find(f"elem[@key='{key}']")
+    return e.text if e is not None else ""
+
+
+def parse_xml(xml_text, target):
+    rows, summary = [], {"target": target, "state": "unknown", "service": "",
+                         "tls_versions": [], "ssh": False, "rdp": False, "weak": [],
+                         "cert": {}, "dh": []}
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        summary["state"] = "nmap-error"
+        return rows, summary
+
+    port = root.find(".//port")
+    if port is None:
+        summary["state"] = "no-result"
+        return rows, summary
+    summary["state"] = port.find("state").get("state")
+    svc = port.find("service")
+    service = ""
+    if svc is not None:
+        service = svc.get("name", "")
+        if svc.get("tunnel"):
+            service = f"{svc.get('tunnel')}/{service}"
+        if svc.get("product"):
+            service += f" ({svc.get('product')} {svc.get('version', '')}".rstrip() + ")"
+    summary["service"] = service
+    if svc is not None:
+        summary["svc_name"] = svc.get("name", "")
+        summary["tunnel"] = svc.get("tunnel", "")
+
+    def add(protocol, version, category, algorithm, detail="", weak=False):
+        rows.append(dict(target=target, service=service, protocol=protocol,
+                         version=version, category=category, algorithm=algorithm,
+                         detail=detail, weak="YES" if weak else "", verified=""))
+        if weak:
+            summary["weak"].append(f"{version or protocol}:{algorithm}")
+
+    for script in port.findall("script"):
+        sid = script.get("id")
+
+        if sid == "ssl-enum-ciphers":
+            for ver in script.findall("table"):
+                v = ver.get("key")
+                summary["tls_versions"].append(v)
+                v_weak = v in WEAK_TLS_VERSIONS
+                add("TLS", v, "version", v, elem_text(ver, "cipher preference"), v_weak)
+                ciphers = ver.find("table[@key='ciphers']")
+                for c in (ciphers.findall("table") if ciphers is not None else []):
+                    name, strength = elem_text(c, "name"), elem_text(c, "strength")
+                    kex = elem_text(c, "kex_info")
+                    weak = bool(WEAK_TLS_CIPHER.search(name)) or strength not in ("A", "")
+                    add("TLS", v, "cipher", name, f"grade={strength} kex={kex}", weak)
+                comp = ver.find("table[@key='compressors']")
+                for c in (comp.findall("elem") if comp is not None else []):
+                    if c.text and c.text != "NULL":
+                        add("TLS", v, "compression", c.text, "CRIME riski", True)
+                warns = ver.find("table[@key='warnings']")
+                for w in (warns.findall("elem") if warns is not None else []):
+                    add("TLS", v, "warning", w.text, "", True)
+            least = script.find("elem[@key='least strength']")
+            if least is not None:
+                add("TLS", "", "least-strength", least.text, "", least.text != "A")
+
+        elif sid == "ssl-cert":
+            parse_cert(script, add, summary)
+
+        elif sid == "ssl-dh-params":
+            parse_dh(script, add, summary)
+
+        elif sid == "ssh2-enum-algos":
+            summary["ssh"] = True
+            for t in script.findall("table"):
+                cat = t.get("key")
+                for e in t.findall("elem"):
+                    add("SSH", "SSH-2", cat, e.text, "", bool(WEAK_SSH.search(e.text or "")))
+
+        elif sid == "rdp-enum-encryption":
+            summary["rdp"] = True
+            out = script.get("output", "")
+            for line in out.splitlines():
+                line = line.strip()
+                if line:
+                    weak = bool(re.search(r"40-bit|56-bit", line))
+                    add("RDP", "", "rdp-encryption", line, "", weak)
+
+    return rows, summary
+
+
+def dn(table):
+    if table is None:
+        return ""
+    return "/".join(f"{e.get('key')}={e.text}" for e in table.findall("elem"))
+
+
+def parse_cert(script, add, summary):
+    subj, issuer = script.find("table[@key='subject']"), script.find("table[@key='issuer']")
+    cn = subj.findtext("elem[@key='commonName']", "") if subj is not None else ""
+    pk = script.find("table[@key='pubkey']")
+    ktype = pk.findtext("elem[@key='type']", "") if pk is not None else ""
+    bits = pk.findtext("elem[@key='bits']", "") if pk is not None else ""
+    curve = pk.findtext(".//elem[@key='curve']", "") if pk is not None else ""
+    sig = script.findtext("elem[@key='sig_algo']", "")
+    nb = script.findtext("table[@key='validity']/elem[@key='notBefore']", "")
+    na = script.findtext("table[@key='validity']/elem[@key='notAfter']", "")
+    san = ""
+    for ext in script.findall("table[@key='extensions']/table"):
+        if ext.findtext("elem[@key='name']", "") == "X509v3 Subject Alternative Name":
+            san = ext.findtext("elem[@key='value']", "")
+
+    try:
+        b = int(bits)
+    except ValueError:
+        b = 0
+    key_weak = (ktype in ("rsa", "dsa", "dh") and b < 2048) or (ktype == "ec" and 0 < b < 256)
+    sig_weak = bool(re.search(r"md2|md4|md5|sha1With|sha1$|ecdsa-with-SHA1", sig, re.I))
+    expired = False
+    try:
+        expired = datetime.fromisoformat(na) < datetime.now()
+    except ValueError:
+        pass
+    self_signed = subj is not None and dn(subj) == dn(issuer)
+
+    add("CERT", "", "subject", dn(subj))
+    add("CERT", "", "issuer", dn(issuer), "self-signed" if self_signed else "", self_signed)
+    if san:
+        add("CERT", "", "san", san)
+    add("CERT", "", "public-key", f"{ktype} {bits}".strip(), curve, key_weak)
+    add("CERT", "", "signature", sig, "", sig_weak)
+    add("CERT", "", "validity", f"{nb} -> {na}", "EXPIRED" if expired else "", expired)
+    summary["cert"] = {"cn": cn, "issuer": dn(issuer), "key": f"{ktype} {bits}".strip(),
+                       "sig": sig, "not_after": na, "expired": expired,
+                       "self_signed": self_signed}
+
+
+def parse_dh(script, add, summary):
+    # vulns kütüphanesi çıktısı: her bulgu title/state/check_results içeren bir tablo
+    for v in script.iter("table"):
+        title = v.findtext("elem[@key='title']")
+        if not title:
+            continue
+        state = v.findtext("elem[@key='state']", "")
+        checks = [e.text for e in v.findall("table[@key='check_results']/elem") if e.text]
+        detail = " ; ".join(" ".join(c.split()) for c in checks)
+        vuln = "VULNERABLE" in state and "NOT" not in state
+        add("DH", "", "dh-params", title, f"{state} {detail}".strip(), vuln)
+        if vuln:
+            summary["dh"].append(title)
+    if not summary["dh"] and not list(script.iter("table")):
+        out = " ".join(script.get("output", "").split())
+        if out:
+            add("DH", "", "dh-params", out)
+
+
+def scan(host, port, timeout):
+    target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    try:
+        xml_text = run_nmap(host, port, timeout)
+    except subprocess.TimeoutExpired:
+        return [], {"target": target, "state": "timeout"}
+    rows, summ = parse_xml(xml_text, target)
+    summ["host"], summ["port"] = host, port
+    return rows, summ
+
+
+# --------------------------------------------------------------------------
+# sslscan ile doğrulama (sadece zayıf bulgusu olan TLS hedefleri)
+# --------------------------------------------------------------------------
+STARTTLS_MAP = {"smtp": "smtp", "submission": "smtp", "imap": "imap", "pop3": "pop3",
+                "ftp": "ftp", "ldap": "ldap", "xmpp": "xmpp", "xmpp-client": "xmpp",
+                "mysql": "mysql", "postgresql": "psql", "irc": "irc"}
+WARNING_KEYWORDS = ["3DES", "RC4", "EXPORT", "NULL", "anon", "DES", "MD5"]
+VERIFY_PROTOCOLS = {"TLS", "CERT", "DH"}
+
+
+def needs_verify(summ, rows):
+    return summ.get("state") == "open" and any(
+        r["weak"] and r["protocol"] in VERIFY_PROTOCOLS for r in rows)
+
+
+def run_sslscan(summ, timeout):
+    host, port = summ["host"], summ["port"]
+    target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    with tempfile.NamedTemporaryFile(suffix=".xml") as tmp:
+        cmd = ["sslscan", "--no-colour", "--iana-names", f"--xml={tmp.name}",
+               "--connect-timeout=10", "--timeout=5"]
+        svc = summ.get("svc_name", "")
+        if summ.get("tunnel") != "ssl" and svc in STARTTLS_MAP:
+            cmd.append(f"--starttls-{STARTTLS_MAP[svc]}")
+        cmd.append(target)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return tmp.read().decode(errors="replace")
+
+
+def parse_sslscan(xml_text):
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    test = root.find("ssltest")
+    if test is None:
+        return None
+    ss = {"protocols": set(), "ciphers": {}, "groups": [], "heartbleed": False,
+          "reneg_insecure": False, "fallback": None, "compression": False, "cert": {}}
+    for pr in test.findall("protocol"):
+        if pr.get("enabled") == "1":
+            t, v = pr.get("type"), pr.get("version")
+            ss["protocols"].add(f"SSLv{v}" if t == "ssl" else f"TLSv{v}")
+    for c in test.findall("cipher"):
+        ss["ciphers"][(c.get("sslversion"), c.get("cipher"))] = c.attrib
+    for g in test.findall("group"):
+        ss["groups"].append((g.get("sslversion"), g.get("name"), g.get("bits")))
+    ss["heartbleed"] = any(h.get("vulnerable") == "1" for h in test.findall("heartbleed"))
+    rn = test.find("renegotiation")
+    if rn is not None:
+        ss["reneg_insecure"] = rn.get("supported") == "1" and rn.get("secure") != "1"
+    fb = test.find("fallback")
+    if fb is not None:
+        ss["fallback"] = fb.get("supported") == "1"
+    cp = test.find("compression")
+    ss["compression"] = cp is not None and cp.get("supported") == "1"
+    cert = test.find("certificates/certificate")
+    if cert is not None:
+        pk = cert.find("pk")
+        ss["cert"] = {
+            "sig": cert.findtext("signature-algorithm", ""),
+            "pk_type": (pk.get("type", "") if pk is not None else "").lower(),
+            "pk_bits": int(pk.get("bits", "0") or 0) if pk is not None else 0,
+            "curve": pk.get("curve_name", "") if pk is not None else "",
+            "expired": cert.findtext("expired", "") == "true",
+            "self_signed": cert.findtext("self-signed", "") == "true",
+        }
+    return ss
+
+
+def verify_row(r, ss):
+    cat, ver, alg = r["category"], r["version"], r["algorithm"] or ""
+    names = [n for (_, n) in ss["ciphers"]]
+    c = ss["cert"]
+    if r["protocol"] == "TLS":
+        if cat == "version":
+            ok = ver in ss["protocols"]
+        elif cat == "cipher":
+            ok = (ver, alg) in ss["ciphers"]
+        elif cat == "compression":
+            ok = ss["compression"]
+        elif cat == "warning":
+            kw = [k for k in WARNING_KEYWORDS if k.lower() in alg.lower()]
+            if not kw:
+                return "N/A"
+            ok = any(k.lower() in n.lower() for k in kw for n in names)
+        else:
+            return "N/A"
+    elif r["protocol"] == "CERT":
+        if not c:
+            return "N/A"
+        if cat == "public-key":
+            ok = (c["pk_type"] in ("rsa", "dsa") and 0 < c["pk_bits"] < 2048) or \
+                 (c["pk_type"] == "ec" and 0 < c["pk_bits"] < 128)  # EC: güvenlik biti
+        elif cat == "signature":
+            ok = bool(re.search(r"md2|md4|md5|sha1", c["sig"], re.I))
+        elif cat == "validity":
+            ok = c["expired"]
+        elif cat == "issuer":
+            ok = c["self_signed"]
+        else:
+            return "N/A"
+    elif r["protocol"] == "DH":
+        dh = [int(a.get("dhebits", 0)) for a in ss["ciphers"].values() if a.get("dhebits")]
+        if "Insufficient" in alg or "Logjam" in alg or "EXPORT" in alg:
+            ok = any(b < 2048 for b in dh)
+        elif "Anonymous" in alg:
+            ok = any("anon" in n for n in names)
+        else:
+            return "N/A"
+    else:
+        return ""
+    return "CONFIRMED" if ok else "NOT-CONFIRMED"
+
+
+def sslscan_extra_rows(summ, ss):
+    base = dict(target=summ["target"], service=summ.get("service", ""),
+                protocol="SSLSCAN", version="", detail="", verified="sslscan")
+    rows = [dict(base, category="heartbleed",
+                 algorithm="VULNERABLE" if ss["heartbleed"] else "not vulnerable",
+                 weak="YES" if ss["heartbleed"] else ""),
+            dict(base, category="renegotiation",
+                 algorithm="insecure" if ss["reneg_insecure"] else "secure/not supported",
+                 weak="YES" if ss["reneg_insecure"] else "")]
+    if ss["fallback"] is not None:
+        rows.append(dict(base, category="fallback-scsv",
+                         algorithm="supported" if ss["fallback"] else "NOT supported",
+                         weak="" if ss["fallback"] else "YES"))
+    for v, name, bits in ss["groups"]:
+        weak = bits.isdigit() and int(bits) < 112
+        rows.append(dict(base, version=v, category="kex-group", algorithm=name,
+                         detail=f"bits={bits}", weak="YES" if weak else ""))
+    return rows
+
+
+def verify_target(summ, rows, timeout):
+    try:
+        ss = parse_sslscan(run_sslscan(summ, timeout))
+    except subprocess.TimeoutExpired:
+        ss = None
+    if ss is None:
+        summ["sslscan"] = {"status": "failed"}
+        return []
+    total = confirmed = 0
+    for r in rows:
+        if r["weak"] and r["protocol"] in VERIFY_PROTOCOLS:
+            r["verified"] = verify_row(r, ss)
+            if r["verified"] in ("CONFIRMED", "NOT-CONFIRMED"):
+                total += 1
+                confirmed += r["verified"] == "CONFIRMED"
+    summ["sslscan"] = {
+        "status": "ok", "confirmed": f"{confirmed}/{total}",
+        "heartbleed": ss["heartbleed"], "reneg_insecure": ss["reneg_insecure"],
+        "fallback_scsv": ss["fallback"],
+        "groups": sorted({n.split(" ")[0] for _, n, _ in ss["groups"]}),
+    }
+    extra = sslscan_extra_rows(summ, ss)
+    summ["weak"].extend(f"sslscan:{r['category']}={r['algorithm']}" for r in extra if r["weak"])
+    return extra
+
+
+def main():
+    ap = argparse.ArgumentParser(description="ip:port listesinden TLS/SSH/RDP algoritma taraması")
+    ap.add_argument("-i", "--input", required=True, help="ip:port listesi")
+    ap.add_argument("-o", "--output", default="tls_results.csv", help="detay CSV")
+    ap.add_argument("-s", "--summary", default="tls_summary.csv", help="hedef başına özet CSV")
+    ap.add_argument("-j", "--json", help="ham sonuçları JSON olarak da yaz")
+    ap.add_argument("-t", "--threads", type=int, default=8, help="paralel nmap sayısı")
+    ap.add_argument("--timeout", type=int, default=120, help="script timeout (sn)")
+    ap.add_argument("--verify", action="store_true",
+                    help="zayıf TLS/CERT/DH bulgusu olan hedefleri sslscan ile doğrula")
+    ap.add_argument("--verify-threads", type=int, default=4, help="paralel sslscan sayısı")
+    args = ap.parse_args()
+
+    with open(args.input) as f:
+        targets = [t for t in (parse_target(l) for l in f) if t]
+    targets = list(dict.fromkeys(targets))  # tekrarları at
+    print(f"[*] {len(targets)} hedef taranacak ({args.threads} paralel)", file=sys.stderr)
+
+    all_rows, summaries = [], []
+    with ThreadPoolExecutor(max_workers=args.threads) as ex:
+        futs = {ex.submit(scan, h, p, args.timeout): (h, p) for h, p in targets}
+        for i, fut in enumerate(as_completed(futs), 1):
+            h, p = futs[fut]
+            try:
+                rows, summ = fut.result()
+            except Exception as e:
+                rows, summ = [], {"target": f"{h}:{p}", "state": f"error: {e}"}
+            all_rows.extend(rows)
+            summaries.append(summ)
+            vers = ",".join(summ.get("tls_versions", [])) or ("SSH" if summ.get("ssh") else
+                                                               "RDP" if summ.get("rdp") else "-")
+            print(f"[{i}/{len(targets)}] {summ['target']:<25} {summ.get('state',''):<9} "
+                  f"{vers}  weak={len(summ.get('weak', []))}", file=sys.stderr)
+
+    if args.verify:
+        if not shutil.which("sslscan"):
+            print("[!] sslscan bulunamadı, doğrulama atlandı", file=sys.stderr)
+        else:
+            by_target = {}
+            for r in all_rows:
+                by_target.setdefault(r["target"], []).append(r)
+            todo = [s for s in summaries if needs_verify(s, by_target.get(s["target"], []))]
+            print(f"[*] sslscan doğrulaması: {len(todo)} hedef", file=sys.stderr)
+            with ThreadPoolExecutor(max_workers=args.verify_threads) as ex:
+                futs = {ex.submit(verify_target, s, by_target[s["target"]], args.timeout): s
+                        for s in todo}
+                for i, fut in enumerate(as_completed(futs), 1):
+                    s = futs[fut]
+                    try:
+                        all_rows.extend(fut.result())
+                    except Exception as e:
+                        s["sslscan"] = {"status": f"error: {e}"}
+                    v = s.get("sslscan", {})
+                    print(f"[v {i}/{len(todo)}] {s['target']:<25} {v.get('status')} "
+                          f"confirmed={v.get('confirmed', '-')}", file=sys.stderr)
+
+    all_rows.sort(key=lambda r: r["target"])
+    with open(args.output, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w.writeheader()
+        w.writerows(all_rows)
+
+    with open(args.summary, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["target", "state", "service", "tls_versions", "cert_cn", "cert_issuer",
+                    "cert_key", "cert_sig", "cert_not_after", "cert_expired",
+                    "cert_self_signed", "dh_issues", "ssh", "rdp", "sslscan_status",
+                    "sslscan_confirmed", "heartbleed", "insecure_reneg", "fallback_scsv",
+                    "kex_groups", "weak_count", "weak_items"])
+        for s in sorted(summaries, key=lambda s: s["target"]):
+            c, v = s.get("cert", {}), s.get("sslscan", {})
+            w.writerow([s["target"], s.get("state", ""), s.get("service", ""),
+                        " ".join(s.get("tls_versions", [])), c.get("cn", ""),
+                        c.get("issuer", ""), c.get("key", ""), c.get("sig", ""),
+                        c.get("not_after", ""), c.get("expired", ""),
+                        c.get("self_signed", ""), " | ".join(s.get("dh", [])),
+                        s.get("ssh", ""), s.get("rdp", ""), v.get("status", ""),
+                        v.get("confirmed", ""), v.get("heartbleed", ""),
+                        v.get("reneg_insecure", ""), v.get("fallback_scsv", ""),
+                        " ".join(v.get("groups", [])), len(s.get("weak", [])),
+                        " | ".join(s.get("weak", []))])
+
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump({"summary": summaries, "rows": all_rows}, f, indent=2)
+
+    print(f"[+] Detay: {args.output}  Özet: {args.summary}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
