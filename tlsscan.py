@@ -490,6 +490,47 @@ def build_report(summaries, rows):
     return "\n".join(out)
 
 
+def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=0.0):
+    """targets listesini paralel tarar; (rows, summaries) döner."""
+    import random
+    import time
+    rows_all, summaries = [], []
+    order = list(targets)
+    if jitter:
+        random.shuffle(order)  # sabit sıra yerine karışık: hız sınırlayıcıları tetiklememek için
+
+    def one(h, p):
+        if jitter:
+            time.sleep(random.uniform(0, jitter))  # her bağlantıdan önce rastgele kısa bekleme
+        return scan(h, p, timeout, engine, conn_timeout)
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        futs = {ex.submit(one, h, p): (h, p) for h, p in order}
+        for i, fut in enumerate(as_completed(futs), 1):
+            h, p = futs[fut]
+            try:
+                rows, summ = fut.result()
+            except Exception as e:
+                t = f"[{h}]:{p}" if ":" in h else f"{h}:{p}"
+                rows, summ = [], {"target": t, "host": h, "port": p, "state": f"error: {e}"}
+            rows_all.extend(rows)
+            summaries.append(summ)
+            vers = ",".join(summ.get("tls_versions", [])) or ("SSH" if summ.get("ssh") else
+                                                              "RDP" if summ.get("rdp") else "-")
+            print(f"[{label}{i}/{len(order)}] {summ['target']:<25} {summ.get('state',''):<9} "
+                  f"{vers}  zayıf bulgu={len(summ.get('weak', []))}", file=sys.stderr)
+    return rows_all, summaries
+
+
+def incomplete(summ):
+    """Yeniden taranması mantıklı hedef mi? (ulaşılamayan ya da yarım kalan sonuç)"""
+    state = summ.get("state", "")
+    if state != "open" and not state.startswith("open"):
+        return True  # filtered, timeout, error, closed
+    # Açık ama hiçbir şey çıkaramadıysak (TLS/SSH/RDP bulunamadı): muhtemelen kesildi
+    return not (summ.get("tls_versions") or summ.get("ssh") or summ.get("rdp"))
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):  # Windows konsolunda Türkçe karakterler
         try:
@@ -514,6 +555,12 @@ def main():
     ap.add_argument("--verify", action="store_true",
                     help="zayıf TLS/CERT/DH bulgusu olan hedefleri sslscan ile doğrula")
     ap.add_argument("--verify-threads", type=int, default=4, help="paralel sslscan sayısı")
+    ap.add_argument("--retry", type=int, default=0, metavar="N",
+                    help="ulaşılamayan/yarım kalan hedefleri N kez daha, yavaş modda tekrar tara")
+    ap.add_argument("--retry-threads", type=int, default=2,
+                    help="yeniden taramada paralel sayısı (varsayılan 2, düşük tutun)")
+    ap.add_argument("--retry-wait", type=int, default=30, metavar="SN",
+                    help="her yeniden tarama turundan önce beklenecek süre (sn)")
     args = ap.parse_args()
 
     engine = args.engine
@@ -528,22 +575,36 @@ def main():
     print(f"[*] {len(targets)} hedef taranacak ({args.threads} paralel, motor: {engine})",
           file=sys.stderr)
 
-    all_rows, summaries = [], []
-    with ThreadPoolExecutor(max_workers=args.threads) as ex:
-        futs = {ex.submit(scan, h, p, args.timeout, engine, args.conn_timeout): (h, p)
-                for h, p in targets}
-        for i, fut in enumerate(as_completed(futs), 1):
-            h, p = futs[fut]
-            try:
-                rows, summ = fut.result()
-            except Exception as e:
-                rows, summ = [], {"target": f"{h}:{p}", "state": f"error: {e}"}
-            all_rows.extend(rows)
-            summaries.append(summ)
-            vers = ",".join(summ.get("tls_versions", [])) or ("SSH" if summ.get("ssh") else
-                                                               "RDP" if summ.get("rdp") else "-")
-            print(f"[{i}/{len(targets)}] {summ['target']:<25} {summ.get('state',''):<9} "
-                  f"{vers}  zayıf bulgu={len(summ.get('weak', []))}", file=sys.stderr)
+    import time
+    all_rows, summaries = run_scans(targets, args.threads, args.timeout, engine,
+                                    args.conn_timeout)
+    by_t = {s["target"]: s for s in summaries}
+
+    # Ulaşılamayan / yarım kalan hedefleri yavaş modda tekrar tara
+    for rnd in range(1, args.retry + 1):
+        retry_targets = [(s["host"], s["port"]) for s in summaries
+                         if incomplete(s) and "host" in s]
+        if not retry_targets:
+            print("[*] Yeniden taranacak hedef kalmadı", file=sys.stderr)
+            break
+        ct = args.conn_timeout + 5 * rnd  # her turda daha uzun bekle
+        print(f"[*] Yeniden tarama turu {rnd}/{args.retry}: {len(retry_targets)} hedef, "
+              f"{args.retry_wait} sn bekleniyor (yavaş mod: {args.retry_threads} paralel, "
+              f"timeout {ct} sn)", file=sys.stderr)
+        time.sleep(args.retry_wait)
+        r_rows, r_summ = run_scans(retry_targets, args.retry_threads, args.timeout, engine,
+                                   ct, label=f"R{rnd} ", jitter=2.0)
+        # Daha iyi bir sonuç geldiyse eskisinin yerine koy
+        for s in r_summ:
+            old = by_t.get(s["target"])
+            if old is None:
+                continue
+            if not incomplete(s) or (incomplete(old) and len(s.get("weak", [])) >=
+                                     len(old.get("weak", []))):
+                all_rows = [r for r in all_rows if r["target"] != s["target"]]
+                all_rows.extend([r for r in r_rows if r["target"] == s["target"]])
+                summaries[summaries.index(old)] = s
+                by_t[s["target"]] = s
 
     if args.verify:
         if not shutil.which("sslscan"):

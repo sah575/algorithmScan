@@ -135,6 +135,15 @@ python3 tlsscan.py -i targets.txt -t 8 --verify -j sonuc.json
 | `--conn-timeout` | `5` | Python motoru: bağlantı/okuma timeout'u (saniye) |
 | `--verify` | kapalı | Zayıf TLS/CERT/DH bulgularını sslscan ile doğrula |
 | `--verify-threads` | `4` | Aynı anda çalışacak sslscan sayısı |
+| `--retry` | `0` | Ulaşılamayan (`filtered`/`timeout`/`error`) ve yarım kalan hedefleri N tur daha, yavaş modda tekrar tara |
+| `--retry-threads` | `2` | Yeniden taramada paralel sayısı (düşük tutun) |
+| `--retry-wait` | `30` | Her yeniden tarama turundan önce beklenecek süre (sn) |
+
+**Yeniden tarama (`--retry`):** İlk taramadan sonra `filtered`, `timeout`, `error` durumundaki ya da `open` görünüp hiç sonuç çıkmayan (tarama ortada kesilmiş) hedefler otomatik olarak tekrar taranır. Her tur öncesinde `--retry-wait` kadar beklenir, daha az paralellik ve daha uzun timeout kullanılır, hedef sırası karıştırılır ve her bağlantı rastgele biraz geciktirilir. Önceki turdan daha iyi (ya da tam) bir sonuç gelirse eskisinin yerine geçer. Örnek:
+
+```bash
+python tlsscan.py -i targets.txt --retry 2 --retry-wait 60
+```
 
 Tarama sırasında her hedef bitince bir ilerleme satırı yazılır:
 
