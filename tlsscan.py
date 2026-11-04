@@ -546,6 +546,9 @@ def main():
                     help="okunabilir metin raporu (sürüm + algoritmalar)")
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="raporu ekrana yazdırma (sadece dosyaya yaz)")
+    ap.add_argument("-e", "--extra", default="tls_algorithms.csv",
+                    help="sade çıktı: target, state, service, tls_version, algorithm "
+                         "(her algoritma bir satır)")
     ap.add_argument("-t", "--threads", type=int, default=8, help="paralel nmap sayısı")
     ap.add_argument("--timeout", type=int, default=120, help="script timeout (sn)")
     ap.add_argument("--engine", choices=["auto", "nmap", "python"], default="auto",
@@ -657,6 +660,19 @@ def main():
                         " ".join(v.get("groups", [])), len(s.get("weak", [])),
                         " | ".join(s.get("weak", []))])
 
+    # Sade çıktı: target, state, service, tls_version, algorithm (her algoritma bir satır)
+    # Sadece gerçek algoritmalar: TLS cipher'ları/kex grupları ve SSH algoritmaları.
+    ALG_CATS = {"cipher", "kex-group", "kex_algorithms", "server_host_key_algorithms",
+                "encryption_algorithms", "mac_algorithms", "compression_algorithms"}
+    state_of = {s["target"]: s.get("state", "") for s in summaries}
+    with open(args.extra, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["target", "state", "service", "tls_version", "algorithm"])
+        for r in all_rows:
+            if r["category"] in ALG_CATS:
+                w.writerow([r["target"], state_of.get(r["target"], ""), r["service"],
+                            r["version"], r["algorithm"]])
+
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump({"summary": summaries, "rows": all_rows}, f, indent=2,
@@ -668,8 +684,8 @@ def main():
     if not args.quiet:
         print(report)
 
-    print(f"[+] Rapor: {args.report}  Detay: {args.output}  Özet: {args.summary}",
-          file=sys.stderr)
+    print(f"[+] Sade: {args.extra}  Rapor: {args.report}  Detay: {args.output}  "
+          f"Özet: {args.summary}", file=sys.stderr)
 
 
 if __name__ == "__main__":

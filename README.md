@@ -126,6 +126,7 @@ python3 tlsscan.py -i targets.txt -t 8 --verify -j sonuc.json
 | `-i, --input` | (zorunlu) | `ip:port` listesi |
 | `-o, --output` | `tls_results.csv` | Detay CSV (her algoritma bir satır) |
 | `-s, --summary` | `tls_summary.csv` | Özet CSV (her hedef bir satır) |
+| `-e, --extra` | `tls_algorithms.csv` | Sade çıktı: `target, state, service, tls_version, algorithm` — her algoritma bir satır |
 | `-r, --report` | `tls_report.txt` | Okunabilir metin raporu: hedef başına sürümler ve algoritmalar |
 | `-q, --quiet` | kapalı | Raporu ekrana yazdırma, sadece dosyaya yaz (uzun listeler için) |
 | `-j, --json` | – | Tüm sonuçları JSON olarak da yaz |
@@ -175,6 +176,20 @@ example.com:443   durum: open   servis: ssl   zayıf bulgu: 3
 ```
 
 ## Çıktılar
+
+### `tls_algorithms.csv`: sade çıktı
+
+Sadece beş sütun, her algoritma (TLS cipher'ları, TLS 1.3/1.2 kex grupları ve SSH algoritmaları) bir satır:
+
+```csv
+target,state,service,tls_version,algorithm
+example.com:443,open,ssl,TLSv1.0,ECDHE-RSA-AES128-SHA
+example.com:443,open,ssl,TLSv1.0,DES-CBC3-SHA
+example.com:443,open,ssl,TLSv1.2,ECDHE-RSA-AES128-GCM-SHA256
+scanme.nmap.org:22,open,ssh (OpenSSH 6.6.1p1),SSH-2,aes256-ctr
+```
+
+SSH hedeflerinde `tls_version` sütunu `SSH-2` olur. (Zayıf/güvenli ayrımı ve sertifika, DH gibi diğer bilgiler bu dosyada yoktur; onlar için `tls_report.txt` ya da `tls_results.csv`'ye bakın.)
 
 ### `tls_results.csv`: detay
 
