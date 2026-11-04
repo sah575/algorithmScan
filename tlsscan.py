@@ -447,7 +447,7 @@ def build_report(summaries, rows):
     for s in sorted(summaries, key=lambda s: s["target"]):
         out.append("=" * 78)
         out.append(f"{s['target']}   durum: {s.get('state', '')}   servis: "
-                   f"{s.get('service', '') or '-'}   zayıf bulgu: {len(s.get('weak', []))}")
+                   f"{s.get('service', '') or '-'}   weak: {len(s.get('weak', []))}")
         trs = by_target.get(s["target"], [])
         if not trs:
             out.append("  (sonuç yok)")
@@ -518,7 +518,7 @@ def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=
             vers = ",".join(summ.get("tls_versions", [])) or ("SSH" if summ.get("ssh") else
                                                               "RDP" if summ.get("rdp") else "-")
             print(f"[{label}{i}/{len(order)}] {summ['target']:<25} {summ.get('state',''):<9} "
-                  f"{vers}  zayıf bulgu={len(summ.get('weak', []))}", file=sys.stderr)
+                  f"{vers}  weak={len(summ.get('weak', []))}", file=sys.stderr)
     return rows_all, summaries
 
 

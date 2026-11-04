@@ -150,17 +150,17 @@ Tarama sırasında her hedef bitince bir ilerleme satırı yazılır:
 
 ```text
 [*] 2 hedef taranacak (8 paralel, motor: python)
-[1/2] scanme.nmap.org:22        open      SSH  zayıf bulgu=21
-[2/2] example.com:443           open      TLSv1.0,TLSv1.1,TLSv1.2,TLSv1.3  zayıf bulgu=3
+[1/2] scanme.nmap.org:22        open      SSH  weak=21
+[2/2] example.com:443           open      TLSv1.0,TLSv1.1,TLSv1.2,TLSv1.3  weak=3
 ```
 
-`zayıf bulgu=N`, o hedefte zayıf (`[ZAYIF]` / `weak=YES`) işaretlenen kaç şey olduğunu gösterir: zayıf TLS sürümleri, cipher'lar, sertifika sorunları, SSH algoritmaları vb. `0` hiçbir zayıflık bulunmadığı anlamına gelir. Hangi bulguların zayıf olduğu raporda ve `tls_summary.csv` → `weak_items` sütununda yazar.
+`weak=N`, o hedefte zayıf (`[ZAYIF]` / `weak=YES`) işaretlenen **kaç şey olduğunu** gösterir (bir sayı, bir seçenek değil): zayıf TLS sürümleri, cipher'lar, sertifika sorunları, SSH algoritmaları vb. `weak=0` hiçbir zayıflık bulunmadığı, `weak=3` üç zayıf bulgu olduğu anlamına gelir. Hangi bulguların zayıf olduğu raporda (`[ZAYIF]` etiketi) ve `tls_summary.csv` → `weak_items` sütununda yazar.
 
 Tarama bitince her hedefin sürümleri ve algoritmaları ekrana yazdırılır ve `tls_report.txt` dosyasına kaydedilir:
 
 ```text
 ==============================================================================
-example.com:443   durum: open   servis: ssl   zayıf bulgu: 3
+example.com:443   durum: open   servis: ssl   weak: 3
   [TLS/SSL]
     TLSv1.0 (cipher tercihi: server) [ZAYIF]
       - ECDHE-RSA-AES128-SHA  (id=0xC013 kex=x25519)
