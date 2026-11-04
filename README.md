@@ -37,13 +37,16 @@ Zayıf olarak işaretlenen (`weak=YES`) durumlar:
 
 Sadece Python standart kütüphanesi (`socket`, `ssl`, `struct`) kullanılır; hiçbir şey kurulmaz.
 
-- **Servis tespiti:** Sunucunun ilk gönderdiği banner'a göre SSH, SMTP/FTP/IMAP/POP3 (STARTTLS) ayırt edilir; banner yoksa doğrudan TLS, olmazsa RDP denenir.
+- **Servis tespiti:** Sunucunun ilk gönderdiği banner'a göre SSH, SMTP/FTP/IMAP/POP3/MySQL (STARTTLS) ayırt edilir. Banner yoksa doğrudan TLS denenir; olmazsa port LDAP (389, 3268), PostgreSQL (5432) ya da XMPP (5222, 5269) ise o protokolün STARTTLS'i, en son RDP denenir.
 - **TLS sürüm ve cipher'lar:** ClientHello paketi elle oluşturulur ve sunucunun ServerHello yanıtı okunur (nmap'in `ssl-enum-ciphers` script'iyle aynı yöntem). Böylece sonuç **yerel OpenSSL'e bağlı değildir**: Windows'taki Python'un OpenSSL'i SSLv3, RC4, EXPORT, NULL gibi eski cipher'ları desteklemese de bunların sunucuda açık olup olmadığı tespit edilir. Kabul edilen cipher'lar eleme yöntemiyle bulunur (liste teklif edilir, sunucunun seçtiği çıkarılır, sunucu reddedene kadar tekrarlanır). Sunucu tercih sırası (server/client) da belirlenir. SSLv3, TLS 1.0, 1.1, 1.2 ve 1.3 taranır.
 - **Kex:** ServerKeyExchange mesajından ECDHE eğrisi ve DHE modulus uzunluğu okunur (`kex=x25519`, `kex=dh 1024`).
 - **DH:** Zayıf DH grubu (< 2048 bit), Logjam (export DH) ve anonim DH. Başlıklar nmap `ssl-dh-params` ile aynıdır.
 - **Sıkıştırma:** DEFLATE teklif edilip sunucunun kabul edip etmediğine bakılır (CRIME).
+- **Renegotiation:** Sunucu RFC 5746 Secure Renegotiation uzantısıyla yanıt vermiyorsa zayıf işaretlenir.
+- **TLS Fallback SCSV:** Desteklenen en yüksek sürümün bir altıyla `TLS_FALLBACK_SCSV` gönderilir. Sunucu `inappropriate_fallback` ile reddetmezse downgrade koruması yok demektir. En az iki sürüm destekleniyorsa test edilir.
+- **Key exchange grupları:** TLS 1.3 ve TLS 1.2 (ECDHE) için her grup (x25519, secp256r1/384r1/521r1, x448, brainpool, ffdhe, eski 160/192-bit eğriler) tek tek denenir. 112 bit güvenliğin altındakiler zayıf işaretlenir.
 - **Sertifika:** `ssl` modülüyle alınır, DER küçük bir ASN.1 ayrıştırıcıyla okunur (subject, issuer, SAN, anahtar tipi/uzunluğu, imza algoritması, geçerlilik, self-signed).
-- **STARTTLS:** SMTP, FTP (`AUTH TLS`), IMAP, POP3 (`STLS`) ve RDP (TLS üzerinden RDP).
+- **STARTTLS:** SMTP, FTP (`AUTH TLS`), IMAP, POP3 (`STLS`), LDAP (StartTLS extended operation), PostgreSQL (SSLRequest), MySQL/MariaDB (SSL capability), XMPP (client ve server) ve RDP (TLS üzerinden RDP).
 - **SSH:** Sunucunun şifrelemeden gönderdiği KEXINIT paketinden kex, host key, şifreleme, MAC ve sıkıştırma listeleri.
 - **RDP:** X.224 Connection Request ile Native RDP, SSL, CredSSP (NLA) ve Early User Auth desteği. Native RDP kabul ediliyorsa (NLA zorunlu değil) zayıf işaretlenir. RDP TLS destekliyorsa TLS cipher'ları ve sertifika da taranır.
 
@@ -51,7 +54,8 @@ nmap motorundan farkları:
 
 - Cipher isimleri OpenSSL formatındadır (`ECDHE-RSA-AES128-GCM-SHA256`); `detail` sütununda IANA cipher kodu (`id=0xC02F`) ve kex bilgisi yer alır.
 - nmap'in A–F notu ve `least-strength` satırı yoktur; zayıflık isim, sürüm ve anahtar uzunluğu kurallarıyla belirlenir.
-- SSLv2 taranmaz. Native RDP'nin şifreleme seviyesi (40/56/128-bit) okunmaz.
+- SSLv2 taranmaz. Native RDP'nin şifreleme seviyesi (40/56/128-bit) okunmaz. Heartbleed kontrolü yoktur (sadece `--verify` ile sslscan üzerinden). IRC STARTTLS desteklenmez.
+- Servis ürün/sürüm bilgisi (nmap `-sV`) yoktur; SSH için banner yazılır.
 
 ### sslscan ile doğrulama (`--verify`)
 
@@ -148,7 +152,7 @@ Sütunlar: `target, service, protocol, version, category, algorithm, detail, wea
 
 | protocol | category değerleri |
 |---|---|
-| `TLS` | `version`, `cipher` (detail: `grade=… kex=…`), `compression`, `warning`, `least-strength` |
+| `TLS` | `version`, `cipher` (detail: `grade=… kex=…`), `compression`, `warning`, `least-strength`; Python motorunda ayrıca `renegotiation`, `fallback-scsv`, `kex-group` |
 | `CERT` | `subject`, `issuer`, `san`, `public-key`, `signature`, `validity` |
 | `DH` | `dh-params` (detail: VULNERABLE / NOT VULNERABLE + modulus bilgisi) |
 | `SSH` | `kex_algorithms`, `server_host_key_algorithms`, `encryption_algorithms`, `mac_algorithms`, `compression_algorithms` |
@@ -166,6 +170,8 @@ Zayıf bulguları süzmek için: `grep ',YES,' tls_results.csv`
 ### `tls_summary.csv`: özet
 
 Her hedef için tek satır: `target, state, service, tls_versions, cert_cn, cert_issuer, cert_key, cert_sig, cert_not_after, cert_expired, cert_self_signed, dh_issues, ssh, rdp, sslscan_status, sslscan_confirmed, heartbleed, insecure_reneg, fallback_scsv, kex_groups, weak_count, weak_items`
+
+`insecure_reneg`, `fallback_scsv` ve `kex_groups` Python motorunda kendi testlerinden, nmap motorunda ise `--verify` ile sslscan'den doldurulur. `heartbleed` sadece sslscan ile doldurulur.
 
 `state` değerleri: `open`, `closed`, `filtered`, `timeout`, `nmap-error`, `no-result`.
 

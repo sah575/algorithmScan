@@ -73,7 +73,17 @@ TLS13_CIPHERS = {0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA3
 GROUPS = {0x001D: "x25519", 0x0017: "secp256r1", 0x0018: "secp384r1", 0x0019: "secp521r1",
           0x001E: "x448", 0x0016: "secp256k1", 0x0015: "secp224r1", 0x0013: "secp192r1",
           0x001A: "brainpoolP256r1", 0x001B: "brainpoolP384r1", 0x001C: "brainpoolP512r1",
-          0x0100: "ffdhe2048", 0x0101: "ffdhe3072", 0x0102: "ffdhe4096"}
+          0x0100: "ffdhe2048", 0x0101: "ffdhe3072", 0x0102: "ffdhe4096",
+          0x0103: "ffdhe6144", 0x0104: "ffdhe8192", 0x000F: "secp160k1",
+          0x0010: "secp160r1", 0x0011: "secp160r2", 0x0012: "secp192k1"}
+# Grupların yaklaşık güvenlik biti (112 altı zayıf)
+GROUP_BITS = {"x25519": 128, "x448": 224, "secp256r1": 128, "secp384r1": 192,
+              "secp521r1": 256, "secp256k1": 128, "secp224r1": 112, "secp192r1": 96,
+              "secp192k1": 96, "secp160k1": 80, "secp160r1": 80, "secp160r2": 80,
+              "brainpoolP256r1": 128, "brainpoolP384r1": 192, "brainpoolP512r1": 256,
+              "ffdhe2048": 112, "ffdhe3072": 128, "ffdhe4096": 152, "ffdhe6144": 176,
+              "ffdhe8192": 192}
+FFDHE = {0x0100, 0x0101, 0x0102, 0x0103, 0x0104}
 SIGALGS = [0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0807, 0x0808, 0x0401,
            0x0501, 0x0601, 0x0303, 0x0203, 0x0201, 0x0402, 0x0202, 0x0301, 0x0302]
 # Bazı sunucular büyük ClientHello'ya yanıt vermez (ör. ~300 bayt üstü); nmap gibi
@@ -130,6 +140,34 @@ def _read_lines(s, done, limit=16384):
     raise ScanError("STARTTLS yanıtı alınamadı")
 
 
+def _read_until(s, done, limit=65536):
+    buf = b""
+    while len(buf) < limit:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+        if done(buf):
+            return buf
+    raise ScanError("STARTTLS yanıtı alınamadı")
+
+
+# LDAP ExtendedRequest: StartTLS (OID 1.3.6.1.4.1.1466.20037)
+LDAP_STARTTLS = bytes.fromhex("301d02010177188016") + b"1.3.6.1.4.1.1466.20037"
+PG_SSLREQUEST = bytes.fromhex("0000000804d2162f")
+MYSQL_CLIENT_SSL = 0x0800
+
+
+def _ldap_done(b):
+    """Tam bir LDAP (BER) mesajı geldi mi?"""
+    if len(b) < 2:
+        return False
+    if b[1] < 0x80:
+        return len(b) >= 2 + b[1]
+    n = b[1] & 0x7F
+    return len(b) >= 2 + n and len(b) >= 2 + n + int.from_bytes(b[2:2 + n], "big")
+
+
 def _code_done(line):
     return bool(re.match(r"^\d{3} ", line))
 
@@ -155,8 +193,43 @@ def rdp_neg_response(s):
     return ("ok", 0)  # müzakere verisi yok: sadece standart RDP
 
 
-def do_starttls(s, kind):
-    if kind == "smtp":
+def do_starttls(s, kind, host=""):
+    if kind == "ldap":
+        s.sendall(LDAP_STARTTLS)
+        resp = _read_until(s, _ldap_done)
+        i = resp.find(b"\x78")  # ExtendedResponse
+        if i < 0 or resp.find(b"\x0a\x01\x00", i) < 0:
+            raise ScanError("LDAP StartTLS reddedildi")
+    elif kind == "psql":
+        s.sendall(PG_SSLREQUEST)
+        if _recv_exact(s, 1) != b"S":
+            raise ScanError("PostgreSQL SSL desteklemiyor")
+    elif kind == "mysql":
+        hdr = _recv_exact(s, 4)
+        if not hdr:
+            raise ScanError("MySQL greeting alınamadı")
+        pkt = _recv_exact(s, int.from_bytes(hdr[:3], "little"))
+        if not pkt or pkt[0] != 0x0A:
+            raise ScanError("MySQL greeting tanınmadı")
+        p = pkt.index(b"\x00", 1) + 1 + 4 + 8 + 1  # sürüm, thread id, salt, filler
+        caps = struct.unpack("<H", pkt[p:p + 2])[0]
+        if not caps & MYSQL_CLIENT_SSL:
+            raise ScanError("MySQL SSL desteklemiyor")
+        flags = 0x1 | 0x200 | MYSQL_CLIENT_SSL | 0x8000 | 0x80000
+        body = struct.pack("<IIB", flags, 16777216, 33) + b"\x00" * 23
+        s.sendall(len(body).to_bytes(3, "little") + b"\x01" + body)
+    elif kind in ("xmpp", "xmpp-server"):
+        ns = "jabber:server" if kind == "xmpp-server" else "jabber:client"
+        s.sendall((f"<?xml version='1.0'?><stream:stream to='{host}' xmlns='{ns}' "
+                   "xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>"
+                   ).encode())
+        feats = _read_until(s, lambda b: b"</stream:features>" in b or b"</stream:stream>" in b)
+        if b"<starttls" not in feats:
+            raise ScanError("XMPP STARTTLS sunmuyor")
+        s.sendall(b"<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        if b"<proceed" not in _read_until(s, lambda b: b"<proceed" in b or b"<failure" in b):
+            raise ScanError("XMPP STARTTLS reddedildi")
+    elif kind == "smtp":
         _read_lines(s, _code_done)
         s.sendall(b"EHLO tlsscan.local\r\n")
         _read_lines(s, _code_done)
@@ -198,7 +271,7 @@ class Conn:
         s = socket.create_connection((self.host, self.port), timeout=self.timeout)
         try:
             if self.starttls:
-                do_starttls(s, self.starttls)
+                do_starttls(s, self.starttls, self.host)
         except Exception:
             s.close()
             raise
@@ -217,19 +290,22 @@ def _u16list(values, lenbytes=2):
     return len(data).to_bytes(lenbytes, "big") + data
 
 
-def client_hello(version, ciphers, sni, tls13=False, compression=False):
+def client_hello(version, ciphers, sni, tls13=False, compression=False, groups=None):
+    groups = list(GROUPS) if groups is None else groups
     exts = b""
     if sni and (version >= 0x0301 or tls13):
         name = sni.encode("idna")
         entry = b"\x00" + struct.pack(">H", len(name)) + name
         exts += _ext(0x0000, struct.pack(">H", len(entry)) + entry)
     if version >= 0x0301 or tls13:
-        exts += _ext(0x000A, _u16list(GROUPS))
+        exts += _ext(0x000A, _u16list(groups))
         exts += _ext(0x000B, b"\x01\x00")
         exts += _ext(0x000D, _u16list(SIGALGS))
     if tls13:
         exts += _ext(0x002B, b"\x02\x03\x04")
-        share = struct.pack(">HH", 0x001D, 32) + os.urandom(32)
+        # x25519 teklif ediliyorsa key_share gönder; yoksa boş key_share (sunucu HRR ile
+        # desteklediği grubu bildirir)
+        share = struct.pack(">HH", 0x001D, 32) + os.urandom(32) if 0x001D in groups else b""
         exts += _ext(0x0033, struct.pack(">H", len(share)) + share)
     suites = list(ciphers) if tls13 else list(ciphers) + [0x00FF]
     comp = b"\x02\x01\x00" if compression else b"\x01\x00"
@@ -252,8 +328,9 @@ def _recv_exact(s, n):
     return buf
 
 
-def read_handshake(s, full):
-    """ServerHello'ya (full=True ise ServerHelloDone'a) kadar handshake mesajlarını okur."""
+def read_handshake(s, full, alert=None):
+    """ServerHello'ya (full=True ise ServerHelloDone'a) kadar handshake mesajlarını okur.
+    alert listesi verilirse gelen alert açıklama kodu ona eklenir."""
     msgs, buf, total = [], b"", 0
     while total < 65536:
         hdr = _recv_exact(s, 5)
@@ -261,6 +338,8 @@ def read_handshake(s, full):
             break
         ctype, _, ln = struct.unpack(">BHH", hdr)
         data = _recv_exact(s, ln)
+        if ctype == 0x15 and data and len(data) >= 2 and alert is not None:
+            alert.append(data[1])
         if data is None or ctype != 0x16:  # alert, CCS, şifreli veri ya da bozuk
             break
         total += ln
@@ -281,7 +360,8 @@ def parse_server_hello(b):
     random = b[2:34]
     p = 35 + b[34]
     info = {"version": ver, "cipher": struct.unpack(">H", b[p:p + 2])[0],
-            "compression": b[p + 2], "hrr": random == HRR_RANDOM, "group": None}
+            "compression": b[p + 2], "hrr": random == HRR_RANDOM, "group": None,
+            "reneg_ext": False}
     p += 3
     if p + 2 <= len(b):
         end = p + 2 + struct.unpack(">H", b[p:p + 2])[0]
@@ -293,6 +373,8 @@ def parse_server_hello(b):
                 info["version"] = struct.unpack(">H", d[:2])[0]
             elif t == 0x0033 and ln >= 2:
                 info["group"] = struct.unpack(">H", d[:2])[0]
+            elif t == 0xFF01:
+                info["reneg_ext"] = True
             p += 4 + ln
     return info
 
@@ -310,15 +392,16 @@ def parse_kex(name, ske):
     return None
 
 
-def probe(conn, version, ciphers, tls13=False, full=False, compression=False):
+def probe(conn, version, ciphers, tls13=False, full=False, compression=False, groups=None,
+          alert=None):
     """Tek bir el sıkışma dener. Sonuç sözlüğü ya da None (reddedildi) döner."""
     try:
         s = conn.open()
     except (OSError, ScanError):
         return None
     try:
-        s.sendall(client_hello(version, ciphers, conn.sni, tls13, compression))
-        msgs = read_handshake(s, full)
+        s.sendall(client_hello(version, ciphers, conn.sni, tls13, compression, groups))
+        msgs = read_handshake(s, full, alert)
     except (OSError, ValueError, IndexError, struct.error):
         return None
     finally:
@@ -373,6 +456,43 @@ def enum_version(conn, vname):
         if r1 and r2:
             pref = "server" if r1["cipher"] == r2["cipher"] else "client"
     return accepted, pref, cert
+
+
+def check_fallback_scsv(conn, versions):
+    """TLS_FALLBACK_SCSV: en yüksek sürümden düşük bir sürümle SCSV gönderilir;
+    sunucu inappropriate_fallback (86) alert'i dönerse koruma vardır."""
+    order = ["SSLv3", "TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"]
+    supported = [v for v in order if v in versions]
+    if len(supported) < 2:
+        return None
+    lower = supported[-2]
+    alert = []
+    r = probe(conn, VERSIONS[lower], DETECT_CIPHERS + [0x5600], alert=alert)
+    if 86 in alert:
+        return True
+    if r and r["version"] == VERSIONS[lower]:
+        return False
+    return None  # belirsiz
+
+
+def enum_groups(conn, versions, ecdhe_12):
+    """Desteklenen key exchange gruplarını tek tek dener."""
+    found = []
+    if "TLSv1.3" in versions:
+        for gid, name in GROUPS.items():
+            r = probe(conn, 0x0304, list(TLS13_CIPHERS), tls13=True, groups=[gid])
+            if r and r["version"] == 0x0304 and r["group"] == gid:
+                found.append(("TLSv1.3", gid, name))
+    if "TLSv1.2" in versions and ecdhe_12:
+        for gid, name in GROUPS.items():
+            if gid in FFDHE:
+                continue
+            r = probe(conn, 0x0303, ecdhe_12, full=True, groups=[gid])
+            if r and r["version"] == 0x0303:
+                ske = r["ske"]
+                if ske and ske[0] == 3 and struct.unpack(">H", ske[1:3])[0] == gid:
+                    found.append(("TLSv1.2", gid, name))
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +712,10 @@ def rdp_scan(host, port, timeout):
 # ---------------------------------------------------------------------------
 # Ana tarama
 # ---------------------------------------------------------------------------
+NOBANNER_STARTTLS = {389: "ldap", 3268: "ldap", 5432: "psql", 5222: "xmpp",
+                     5269: "xmpp-server"}
+
+
 def _dn(pairs):
     return "/".join(f"{k}={v}" for k, v in pairs)
 
@@ -658,11 +782,21 @@ def scan_target(host, port, timeout=5):
         starttls = "imap"
     elif text.startswith("+OK"):
         starttls = "pop3"
+    elif len(banner) >= 5 and banner[3] == 0 and banner[4] == 0x0A:
+        starttls = "mysql"
+
+    def detect(c):
+        return probe(c, 0x0303, DETECT_CIPHERS) or \
+            probe(c, 0x0304, list(TLS13_CIPHERS), tls13=True) or \
+            probe(c, 0x0301, DETECT_CIPHERS) or probe(c, 0x0300, DETECT_CIPHERS)
 
     conn = Conn(host, port, timeout, starttls)
-    is_tls = probe(conn, 0x0303, DETECT_CIPHERS) or \
-        probe(conn, 0x0304, list(TLS13_CIPHERS), tls13=True) or \
-        probe(conn, 0x0301, DETECT_CIPHERS) or probe(conn, 0x0300, DETECT_CIPHERS)
+    is_tls = detect(conn)
+    if not is_tls and not banner and port in NOBANNER_STARTTLS:
+        # Sunucu önce konuşmuyorsa ve port bilinen bir STARTTLS portuysa
+        starttls = NOBANNER_STARTTLS[port]
+        conn = Conn(host, port, timeout, starttls)
+        is_tls = detect(conn)
 
     # 4) TLS değilse RDP dene
     if not is_tls and not starttls:
@@ -696,7 +830,7 @@ def scan_target(host, port, timeout=5):
         summary["service"] += "/ssl"
 
     # 5) Sürüm ve cipher taraması
-    raw_cert, dh_bits, anon, export_dh = None, [], False, False
+    raw_cert, dh_bits, anon, export_dh, ecdhe_all = None, [], False, False, []
     for vname in ("SSLv3", "TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"):
         accepted, pref, cert = enum_version(conn, vname)
         if not accepted:
@@ -713,14 +847,38 @@ def scan_target(host, port, timeout=5):
                     dh_bits.append(kex[1])
             if re.search(r"ADH|AECDH", name):
                 anon = True
+            if "ECDHE" in name and vname != "TLSv1.3":
+                ecdhe_all.append((vname, cid, name))
             if name.startswith("EXP") and "DH" in name:
                 export_dh = True
             add("TLS", vname, "cipher", name,
                 f"id=0x{cid:04X}" + (f" kex={kex_s}" if kex_s else ""),
                 bool(WEAK_CIPHER.search(name)))
 
-    # Sıkıştırma (CRIME)
+    # Sıkıştırma (CRIME), renegotiation, fallback SCSV, key exchange grupları
+    extra = summary["tls_extra"] = {}
     legacy = [v for v in summary["tls_versions"] if v != "TLSv1.3"]
+    if legacy:
+        r = probe(conn, VERSIONS[legacy[-1]], DETECT_CIPHERS)
+        if r:
+            # RFC 5746: sunucu renegotiation_info uzantısıyla yanıt vermeli
+            extra["reneg_insecure"] = not r["reneg_ext"]
+            add("TLS", legacy[-1], "renegotiation",
+                "secure (RFC 5746)" if r["reneg_ext"] else "Secure Renegotiation desteklenmiyor",
+                "", not r["reneg_ext"])
+    fb = check_fallback_scsv(conn, summary["tls_versions"])
+    if fb is not None:
+        extra["fallback_scsv"] = fb
+        add("TLS", "", "fallback-scsv", "supported" if fb else "NOT supported",
+            "downgrade koruması", not fb)
+    ecdhe_12 = [c for v, c, n in ecdhe_all if v == "TLSv1.2"][:CHUNK]
+    groups = enum_groups(conn, summary["tls_versions"], ecdhe_12)
+    extra["groups"] = sorted({n for _, _, n in groups})
+    for v, gid, name in groups:
+        bits = GROUP_BITS.get(name, 0)
+        add("TLS", v, "kex-group", name, f"id=0x{gid:04x} bits={bits or '?'}",
+            0 < bits < 112)
+
     if legacy:
         r = probe(conn, VERSIONS[legacy[-1]], DETECT_CIPHERS, compression=True)
         if r and r["compression"] == 1:

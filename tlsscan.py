@@ -246,7 +246,8 @@ def scan(host, port, timeout, engine="nmap", conn_timeout=5):
 # --------------------------------------------------------------------------
 STARTTLS_MAP = {"smtp": "smtp", "submission": "smtp", "imap": "imap", "pop3": "pop3",
                 "ftp": "ftp", "ldap": "ldap", "xmpp": "xmpp", "xmpp-client": "xmpp",
-                "mysql": "mysql", "postgresql": "psql", "irc": "irc"}
+                "xmpp-server": "xmpp", "mysql": "mysql", "postgresql": "psql",
+                "psql": "psql", "irc": "irc"}
 WARNING_KEYWORDS = ["3DES", "RC4", "EXPORT", "NULL", "anon", "DES", "MD5"]
 VERIFY_PROTOCOLS = {"TLS", "CERT", "DH"}
 
@@ -498,7 +499,10 @@ def main():
                     "sslscan_confirmed", "heartbleed", "insecure_reneg", "fallback_scsv",
                     "kex_groups", "weak_count", "weak_items"])
         for s in sorted(summaries, key=lambda s: s["target"]):
-            c, v = s.get("cert", {}), s.get("sslscan", {})
+            c, v = s.get("cert", {}), dict(s.get("sslscan", {}))
+            # Python motorunun kendi bulguları; sslscan sonucu varsa o öncelikli
+            for k, val in s.get("tls_extra", {}).items():
+                v.setdefault(k, val)
             w.writerow([s["target"], s.get("state", ""), s.get("service", ""),
                         " ".join(s.get("tls_versions", [])), c.get("cn", ""),
                         c.get("issuer", ""), c.get("key", ""), c.get("sig", ""),
