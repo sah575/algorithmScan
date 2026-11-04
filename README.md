@@ -126,6 +126,8 @@ python3 tlsscan.py -i targets.txt -t 8 --verify -j sonuc.json
 | `-i, --input` | (zorunlu) | `ip:port` listesi |
 | `-o, --output` | `tls_results.csv` | Detay CSV (her algoritma bir satır) |
 | `-s, --summary` | `tls_summary.csv` | Özet CSV (her hedef bir satır) |
+| `-r, --report` | `tls_report.txt` | Okunabilir metin raporu: hedef başına sürümler ve algoritmalar |
+| `-q, --quiet` | kapalı | Raporu ekrana yazdırma, sadece dosyaya yaz (uzun listeler için) |
 | `-j, --json` | – | Tüm sonuçları JSON olarak da yaz |
 | `-t, --threads` | `8` | Aynı anda çalışacak nmap sayısı |
 | `--engine` | `auto` | `auto` (nmap varsa nmap), `nmap` ya da `python` |
@@ -134,14 +136,33 @@ python3 tlsscan.py -i targets.txt -t 8 --verify -j sonuc.json
 | `--verify` | kapalı | Zayıf TLS/CERT/DH bulgularını sslscan ile doğrula |
 | `--verify-threads` | `4` | Aynı anda çalışacak sslscan sayısı |
 
-İlerleme stderr'e yazılır:
+Tarama sırasında her hedef bitince bir ilerleme satırı yazılır:
 
 ```text
-[*] 3 hedef taranacak (3 paralel)
-[1/3] scanme.nmap.org:22        open      SSH  weak=22
-[2/3] example.com:443           open      TLSv1.0,TLSv1.1,TLSv1.2,TLSv1.3  weak=5
-[*] sslscan doğrulaması: 1 hedef
-[v 1/1] example.com:443           ok confirmed=4/4
+[*] 2 hedef taranacak (8 paralel, motor: python)
+[1/2] scanme.nmap.org:22        open      SSH  zayıf bulgu=21
+[2/2] example.com:443           open      TLSv1.0,TLSv1.1,TLSv1.2,TLSv1.3  zayıf bulgu=3
+```
+
+`zayıf bulgu=N`, o hedefte zayıf (`[ZAYIF]` / `weak=YES`) işaretlenen kaç şey olduğunu gösterir: zayıf TLS sürümleri, cipher'lar, sertifika sorunları, SSH algoritmaları vb. `0` hiçbir zayıflık bulunmadığı anlamına gelir. Hangi bulguların zayıf olduğu raporda ve `tls_summary.csv` → `weak_items` sütununda yazar.
+
+Tarama bitince her hedefin sürümleri ve algoritmaları ekrana yazdırılır ve `tls_report.txt` dosyasına kaydedilir:
+
+```text
+==============================================================================
+example.com:443   durum: open   servis: ssl   zayıf bulgu: 3
+  [TLS/SSL]
+    TLSv1.0 (cipher tercihi: server) [ZAYIF]
+      - ECDHE-RSA-AES128-SHA  (id=0xC013 kex=x25519)
+      - AES128-SHA  (id=0x002F kex=rsa)
+      - DES-CBC3-SHA  (id=0x000A kex=rsa) [ZAYIF]
+    TLSv1.2 (cipher tercihi: client)
+      - ECDHE-RSA-AES128-GCM-SHA256  (id=0xC02F kex=x25519)
+      ...
+  [Sertifika]
+    Açık anahtar: ec 256  (prime256v1)
+    İmza algoritması: ecdsa-with-SHA256
+==============================================================================
 ```
 
 ## Çıktılar

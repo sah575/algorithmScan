@@ -770,7 +770,9 @@ def scan_target(host, port, timeout=5):
         for cat, lst in zip(SSH_LISTS, lists):
             if cat:
                 for alg in filter(None, lst.split(",")):
-                    add("SSH", "SSH-2", cat, alg, "", bool(WEAK_SSH.search(alg)))
+                    # sıkıştırmada "none" normaldir; sadece şifreleme/MAC'te zayıftır
+                    weak = bool(WEAK_SSH.search(alg)) and cat != "compression_algorithms"
+                    add("SSH", "SSH-2", cat, alg, "", weak)
         return rows, summary
 
     # 3) STARTTLS türü

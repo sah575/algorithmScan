@@ -148,7 +148,9 @@ def parse_xml(xml_text, target):
             for t in script.findall("table"):
                 cat = t.get("key")
                 for e in t.findall("elem"):
-                    add("SSH", "SSH-2", cat, e.text, "", bool(WEAK_SSH.search(e.text or "")))
+                    # sıkıştırmada "none" normaldir; sadece şifreleme/MAC'te zayıftır
+                    weak = bool(WEAK_SSH.search(e.text or "")) and cat != "compression_algorithms"
+                    add("SSH", "SSH-2", cat, e.text, "", weak)
 
         elif sid == "rdp-enum-encryption":
             summary["rdp"] = True
@@ -412,6 +414,82 @@ def verify_target(summ, rows, timeout):
     return extra
 
 
+# --------------------------------------------------------------------------
+# Okunabilir rapor (konsol + txt)
+# --------------------------------------------------------------------------
+CATEGORY_LABELS = {
+    "version": "Sürüm", "cipher": "Cipher", "compression": "Sıkıştırma",
+    "warning": "Uyarı", "least-strength": "En düşük not", "renegotiation": "Renegotiation",
+    "fallback-scsv": "Fallback SCSV", "kex-group": "Key exchange grubu",
+    "subject": "Subject", "issuer": "Issuer", "san": "SAN", "public-key": "Açık anahtar",
+    "signature": "İmza algoritması", "validity": "Geçerlilik", "dh-params": "DH",
+    "kex_algorithms": "Key exchange (kex)", "server_host_key_algorithms": "Host key",
+    "encryption_algorithms": "Şifreleme", "mac_algorithms": "MAC",
+    "compression_algorithms": "Sıkıştırma", "rdp-encryption": "Güvenlik protokolü",
+    "heartbleed": "Heartbleed", "error": "Hata",
+}
+PROTOCOL_LABELS = {"TLS": "TLS/SSL", "CERT": "Sertifika", "DH": "Diffie-Hellman",
+                   "SSH": "SSH", "RDP": "RDP", "SSLSCAN": "sslscan ek kontroller"}
+
+
+def _mark(r):
+    m = " [ZAYIF]" if r["weak"] else ""
+    if r.get("verified") in ("CONFIRMED", "NOT-CONFIRMED"):
+        m += f" [{r['verified']}]"
+    return m
+
+
+def build_report(summaries, rows):
+    by_target = {}
+    for r in rows:
+        by_target.setdefault(r["target"], []).append(r)
+    out = []
+    for s in sorted(summaries, key=lambda s: s["target"]):
+        out.append("=" * 78)
+        out.append(f"{s['target']}   durum: {s.get('state', '')}   servis: "
+                   f"{s.get('service', '') or '-'}   zayıf bulgu: {len(s.get('weak', []))}")
+        trs = by_target.get(s["target"], [])
+        if not trs:
+            out.append("  (sonuç yok)")
+            continue
+        protocols = list(dict.fromkeys(r["protocol"] for r in trs))
+        for proto in protocols:
+            out.append(f"  [{PROTOCOL_LABELS.get(proto, proto)}]")
+            prs = [r for r in trs if r["protocol"] == proto]
+            if proto == "SSH":
+                for cat in dict.fromkeys(r["category"] for r in prs):
+                    items = [r["algorithm"] + (" [ZAYIF]" if r["weak"] else "")
+                             for r in prs if r["category"] == cat]
+                    out.append(f"    {CATEGORY_LABELS.get(cat, cat)}:")
+                    out.extend(f"      - {i}" for i in items)
+                continue
+            if proto == "TLS":
+                versions = list(dict.fromkeys(r["version"] for r in prs if r["version"]))
+                for v in versions:
+                    vr = [r for r in prs if r["version"] == v]
+                    head = next((r for r in vr if r["category"] == "version"), None)
+                    pref = f" (cipher tercihi: {head['detail']})" if head and head["detail"] else ""
+                    out.append(f"    {v}{pref}{_mark(head) if head else ''}")
+                    for r in vr:
+                        if r["category"] == "version":
+                            continue
+                        label = "" if r["category"] == "cipher" else \
+                            CATEGORY_LABELS.get(r["category"], r["category"]) + ": "
+                        detail = f"  ({r['detail']})" if r["detail"] else ""
+                        out.append(f"      - {label}{r['algorithm']}{detail}{_mark(r)}")
+                rest = [r for r in prs if not r["version"]]
+            else:
+                rest = prs
+            for r in rest:
+                label = CATEGORY_LABELS.get(r["category"], r["category"])
+                if r["version"]:
+                    label = f"{r['version']} {label}"
+                detail = f"  ({r['detail']})" if r["detail"] else ""
+                out.append(f"    {label}: {r['algorithm']}{detail}{_mark(r)}")
+    out.append("=" * 78)
+    return "\n".join(out)
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):  # Windows konsolunda Türkçe karakterler
         try:
@@ -423,6 +501,10 @@ def main():
     ap.add_argument("-o", "--output", default="tls_results.csv", help="detay CSV")
     ap.add_argument("-s", "--summary", default="tls_summary.csv", help="hedef başına özet CSV")
     ap.add_argument("-j", "--json", help="ham sonuçları JSON olarak da yaz")
+    ap.add_argument("-r", "--report", default="tls_report.txt",
+                    help="okunabilir metin raporu (sürüm + algoritmalar)")
+    ap.add_argument("-q", "--quiet", action="store_true",
+                    help="raporu ekrana yazdırma (sadece dosyaya yaz)")
     ap.add_argument("-t", "--threads", type=int, default=8, help="paralel nmap sayısı")
     ap.add_argument("--timeout", type=int, default=120, help="script timeout (sn)")
     ap.add_argument("--engine", choices=["auto", "nmap", "python"], default="auto",
@@ -461,7 +543,7 @@ def main():
             vers = ",".join(summ.get("tls_versions", [])) or ("SSH" if summ.get("ssh") else
                                                                "RDP" if summ.get("rdp") else "-")
             print(f"[{i}/{len(targets)}] {summ['target']:<25} {summ.get('state',''):<9} "
-                  f"{vers}  weak={len(summ.get('weak', []))}", file=sys.stderr)
+                  f"{vers}  zayıf bulgu={len(summ.get('weak', []))}", file=sys.stderr)
 
     if args.verify:
         if not shutil.which("sslscan"):
@@ -519,7 +601,14 @@ def main():
             json.dump({"summary": summaries, "rows": all_rows}, f, indent=2,
                       ensure_ascii=False)
 
-    print(f"[+] Detay: {args.output}  Özet: {args.summary}", file=sys.stderr)
+    report = build_report(summaries, all_rows)
+    with open(args.report, "w", encoding="utf-8-sig") as f:
+        f.write(report + "\n")
+    if not args.quiet:
+        print(report)
+
+    print(f"[+] Rapor: {args.report}  Detay: {args.output}  Özet: {args.summary}",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":
