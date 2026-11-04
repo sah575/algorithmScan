@@ -1,8 +1,19 @@
 # tlsscan
 
-`ip:port` listesindeki her hedefin şifreleme yapılandırmasını çıkaran, zayıf olanları işaretleyen ve isteğe bağlı olarak bulguları ikinci bir araçla (sslscan) doğrulayan tarama script'i. Altyapıda nmap NSE script'leri kullanılır; sonuçlar CSV (ve istenirse JSON) olarak yazılır.
+`ip:port` listesindeki her hedefin şifreleme yapılandırmasını çıkaran, zayıf olanları işaretleyen ve isteğe bağlı olarak bulguları ikinci bir araçla (sslscan) doğrulayan tarama script'i. Sonuçlar CSV (ve istenirse JSON) olarak yazılır.
+
+İki tarama motoru vardır:
+
+| Motor | Gereksinim | Ne zaman |
+|---|---|---|
+| `nmap` | nmap kurulu olmalı | Kali/Linux; nmap NSE script'leri kullanılır |
+| `python` | Sadece Python 3.7+ (ek paket yok) | **nmap'in olmadığı / kurulum izni olmayan makineler (ör. Windows)** |
+
+Varsayılan `--engine auto`: nmap varsa nmap, yoksa Python motoru kullanılır. İki motor da aynı CSV formatında çıktı üretir.
 
 ## Ne yapıyor?
+
+### nmap motoru
 
 Her hedef için tek bir nmap çalıştırılır (`-sV` ile servis tespiti + aşağıdaki NSE script'leri). Port hangi servisse ilgili script sonuç döner:
 
@@ -22,6 +33,26 @@ Zayıf olarak işaretlenen (`weak=YES`) durumlar:
 - **SSH:** CBC modlu şifreler, arcfour, 3des, blowfish, cast128; hmac-md5, `*-96` MAC'ler, umac-64; `diffie-hellman-group1-*`, sha1 tabanlı DH; ssh-dss; `none`
 - **RDP:** 40/56-bit şifreleme
 
+### Python motoru (`pyscan.py`)
+
+Sadece Python standart kütüphanesi (`socket`, `ssl`, `struct`) kullanılır; hiçbir şey kurulmaz.
+
+- **Servis tespiti:** Sunucunun ilk gönderdiği banner'a göre SSH, SMTP/FTP/IMAP/POP3 (STARTTLS) ayırt edilir; banner yoksa doğrudan TLS, olmazsa RDP denenir.
+- **TLS sürüm ve cipher'lar:** ClientHello paketi elle oluşturulur ve sunucunun ServerHello yanıtı okunur (nmap'in `ssl-enum-ciphers` script'iyle aynı yöntem). Böylece sonuç **yerel OpenSSL'e bağlı değildir**: Windows'taki Python'un OpenSSL'i SSLv3, RC4, EXPORT, NULL gibi eski cipher'ları desteklemese de bunların sunucuda açık olup olmadığı tespit edilir. Kabul edilen cipher'lar eleme yöntemiyle bulunur (liste teklif edilir, sunucunun seçtiği çıkarılır, sunucu reddedene kadar tekrarlanır). Sunucu tercih sırası (server/client) da belirlenir. SSLv3, TLS 1.0, 1.1, 1.2 ve 1.3 taranır.
+- **Kex:** ServerKeyExchange mesajından ECDHE eğrisi ve DHE modulus uzunluğu okunur (`kex=x25519`, `kex=dh 1024`).
+- **DH:** Zayıf DH grubu (< 2048 bit), Logjam (export DH) ve anonim DH. Başlıklar nmap `ssl-dh-params` ile aynıdır.
+- **Sıkıştırma:** DEFLATE teklif edilip sunucunun kabul edip etmediğine bakılır (CRIME).
+- **Sertifika:** `ssl` modülüyle alınır, DER küçük bir ASN.1 ayrıştırıcıyla okunur (subject, issuer, SAN, anahtar tipi/uzunluğu, imza algoritması, geçerlilik, self-signed).
+- **STARTTLS:** SMTP, FTP (`AUTH TLS`), IMAP, POP3 (`STLS`) ve RDP (TLS üzerinden RDP).
+- **SSH:** Sunucunun şifrelemeden gönderdiği KEXINIT paketinden kex, host key, şifreleme, MAC ve sıkıştırma listeleri.
+- **RDP:** X.224 Connection Request ile Native RDP, SSL, CredSSP (NLA) ve Early User Auth desteği. Native RDP kabul ediliyorsa (NLA zorunlu değil) zayıf işaretlenir. RDP TLS destekliyorsa TLS cipher'ları ve sertifika da taranır.
+
+nmap motorundan farkları:
+
+- Cipher isimleri OpenSSL formatındadır (`ECDHE-RSA-AES128-GCM-SHA256`); `detail` sütununda IANA cipher kodu (`id=0xC02F`) ve kex bilgisi yer alır.
+- nmap'in A–F notu ve `least-strength` satırı yoktur; zayıflık isim, sürüm ve anahtar uzunluğu kurallarıyla belirlenir.
+- SSLv2 taranmaz. Native RDP'nin şifreleme seviyesi (40/56/128-bit) okunmaz.
+
 ### sslscan ile doğrulama (`--verify`)
 
 `--verify` verilirse nmap taramasından sonra **sadece TLS/sertifika/DH tarafında zayıf bulgusu olan** açık hedefler bir de `sslscan` ile taranır. Temiz hedefler ve SSH/RDP portları tekrar taranmaz.
@@ -32,7 +63,20 @@ Zayıf olarak işaretlenen (`weak=YES`) durumlar:
 
 ## Kurulum
 
-Gereksinimler: Python 3.8+, nmap (7.90+ önerilir, TLS 1.3 desteği için), sslscan (sadece `--verify` için). Ek bir Python paketi gerekmez.
+### Windows (nmap yok, kurulum izni yok)
+
+Sadece Python 3.7+ gerekir. `tlsscan.py` ve `pyscan.py` dosyalarını **aynı klasöre** kopyalamanız yeterli:
+
+```powershell
+python --version
+python tlsscan.py -i targets.txt
+```
+
+nmap bulunamadığında Python motoru otomatik seçilir (açıkça seçmek için `--engine python`). sslscan olmadığından `--verify` verilirse uyarı verip atlanır. CSV dosyaları Excel'de Türkçe karakterler doğru görünsün diye UTF-8 BOM ile yazılır. Not Defteri'yle kaydedilmiş (BOM'lu) hedef listeleri de sorunsuz okunur.
+
+### Linux / Kali
+
+Gereksinimler: Python 3.7+, nmap (7.90+ önerilir, TLS 1.3 desteği için), sslscan (sadece `--verify` için). Ek bir Python paketi gerekmez. nmap yoksa Python motoru kullanılır.
 
 Kali'de ikisi de hazır gelir. Diğer Debian/Ubuntu sistemlerinde:
 
@@ -80,7 +124,9 @@ python3 tlsscan.py -i targets.txt -t 8 --verify -j sonuc.json
 | `-s, --summary` | `tls_summary.csv` | Özet CSV (her hedef bir satır) |
 | `-j, --json` | – | Tüm sonuçları JSON olarak da yaz |
 | `-t, --threads` | `8` | Aynı anda çalışacak nmap sayısı |
-| `--timeout` | `120` | Hedef başına NSE script timeout'u (saniye) |
+| `--engine` | `auto` | `auto` (nmap varsa nmap), `nmap` ya da `python` |
+| `--timeout` | `120` | nmap motoru: hedef başına NSE script timeout'u (saniye) |
+| `--conn-timeout` | `5` | Python motoru: bağlantı/okuma timeout'u (saniye) |
 | `--verify` | kapalı | Zayıf TLS/CERT/DH bulgularını sslscan ile doğrula |
 | `--verify-threads` | `4` | Aynı anda çalışacak sslscan sayısı |
 
@@ -128,5 +174,5 @@ Her hedef için tek satır: `target, state, service, tls_versions, cert_cn, cert
 - **IP ile taramada SNI gönderilmez.** Sunucu varsayılan sertifikasını döner. Aynı IP'de birden fazla site varsa ve belirli bir sitenin sertifikası lazımsa listede hostname kullanın (`site.example.com:443`).
 - **Paralellik:** Bazı sunucular ve WAF/IPS'ler yoğun TLS el sıkışmalarını engeller; hedef `filtered` görünür ya da sonuç eksik gelir. Uzun listelerde `-t 4–8` önerilir. `filtered`, `timeout` ya da `sslscan_status=failed` çıkan hedefleri daha sonra tek tek yeniden tarayın.
 - **`NOT-CONFIRMED`** her zaman yanlış alarm demek değildir. Sistemdeki OpenSSL'e bağlı derlenen sslscan bazı eski protokolleri deneyemeyebilir. Bu satırları elle kontrol edin, örneğin: `openssl s_client -connect host:port -tls1`
-- **Süre:** `ssl-enum-ciphers` her sürüm/cipher için ayrı el sıkışma yapar; bir TLS hedefi birkaç saniyeden birkaç dakikaya kadar sürebilir.
+- **Süre:** İki motor da her sürüm/cipher için ayrı el sıkışma yapar; bir TLS hedefi birkaç saniyeden birkaç dakikaya kadar sürebilir. Python motoru genelde daha hızlıdır (example.com: ~10 sn).
 - Script'i sadece **taranma izni olan** sistemlerde kullanın.

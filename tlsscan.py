@@ -227,7 +227,10 @@ def parse_dh(script, add, summary):
             add("DH", "", "dh-params", out)
 
 
-def scan(host, port, timeout):
+def scan(host, port, timeout, engine="nmap", conn_timeout=5):
+    if engine == "python":
+        import pyscan
+        return pyscan.scan_target(host, port, conn_timeout)
     target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
     try:
         xml_text = run_nmap(host, port, timeout)
@@ -281,8 +284,13 @@ def parse_sslscan(xml_text):
         if pr.get("enabled") == "1":
             t, v = pr.get("type"), pr.get("version")
             ss["protocols"].add(f"SSLv{v}" if t == "ssl" else f"TLSv{v}")
+    ss["cipher_ids"] = set()
     for c in test.findall("cipher"):
         ss["ciphers"][(c.get("sslversion"), c.get("cipher"))] = c.attrib
+        try:
+            ss["cipher_ids"].add((c.get("sslversion"), int(c.get("id", ""), 16)))
+        except ValueError:
+            pass
     for g in test.findall("group"):
         ss["groups"].append((g.get("sslversion"), g.get("name"), g.get("bits")))
     ss["heartbleed"] = any(h.get("vulnerable") == "1" for h in test.findall("heartbleed"))
@@ -316,7 +324,11 @@ def verify_row(r, ss):
         if cat == "version":
             ok = ver in ss["protocols"]
         elif cat == "cipher":
-            ok = (ver, alg) in ss["ciphers"]
+            m = re.search(r"id=0x([0-9A-Fa-f]{4})", r.get("detail", ""))
+            if m:  # python motoru: OpenSSL ismi + id; id ile karşılaştır
+                ok = (ver, int(m.group(1), 16)) in ss["cipher_ids"]
+            else:  # nmap motoru: IANA ismi
+                ok = (ver, alg) in ss["ciphers"]
         elif cat == "compression":
             ok = ss["compression"]
         elif cat == "warning":
@@ -400,6 +412,11 @@ def verify_target(summ, rows, timeout):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):  # Windows konsolunda Türkçe karakterler
+        try:
+            stream.reconfigure(errors="replace")
+        except AttributeError:
+            pass
     ap = argparse.ArgumentParser(description="ip:port listesinden TLS/SSH/RDP algoritma taraması")
     ap.add_argument("-i", "--input", required=True, help="ip:port listesi")
     ap.add_argument("-o", "--output", default="tls_results.csv", help="detay CSV")
@@ -407,19 +424,31 @@ def main():
     ap.add_argument("-j", "--json", help="ham sonuçları JSON olarak da yaz")
     ap.add_argument("-t", "--threads", type=int, default=8, help="paralel nmap sayısı")
     ap.add_argument("--timeout", type=int, default=120, help="script timeout (sn)")
+    ap.add_argument("--engine", choices=["auto", "nmap", "python"], default="auto",
+                    help="tarama motoru: auto = nmap varsa nmap, yoksa saf Python")
+    ap.add_argument("--conn-timeout", type=int, default=5,
+                    help="python motoru: bağlantı/okuma timeout'u (sn)")
     ap.add_argument("--verify", action="store_true",
                     help="zayıf TLS/CERT/DH bulgusu olan hedefleri sslscan ile doğrula")
     ap.add_argument("--verify-threads", type=int, default=4, help="paralel sslscan sayısı")
     args = ap.parse_args()
 
-    with open(args.input) as f:
+    engine = args.engine
+    if engine == "auto":
+        engine = "nmap" if shutil.which("nmap") else "python"
+    elif engine == "nmap" and not shutil.which("nmap"):
+        sys.exit("[!] nmap bulunamadı. --engine python kullanın.")
+
+    with open(args.input, encoding="utf-8-sig") as f:
         targets = [t for t in (parse_target(l) for l in f) if t]
     targets = list(dict.fromkeys(targets))  # tekrarları at
-    print(f"[*] {len(targets)} hedef taranacak ({args.threads} paralel)", file=sys.stderr)
+    print(f"[*] {len(targets)} hedef taranacak ({args.threads} paralel, motor: {engine})",
+          file=sys.stderr)
 
     all_rows, summaries = [], []
     with ThreadPoolExecutor(max_workers=args.threads) as ex:
-        futs = {ex.submit(scan, h, p, args.timeout): (h, p) for h, p in targets}
+        futs = {ex.submit(scan, h, p, args.timeout, engine, args.conn_timeout): (h, p)
+                for h, p in targets}
         for i, fut in enumerate(as_completed(futs), 1):
             h, p = futs[fut]
             try:
@@ -456,12 +485,12 @@ def main():
                           f"confirmed={v.get('confirmed', '-')}", file=sys.stderr)
 
     all_rows.sort(key=lambda r: r["target"])
-    with open(args.output, "w", newline="") as f:
+    with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
         w.writerows(all_rows)
 
-    with open(args.summary, "w", newline="") as f:
+    with open(args.summary, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["target", "state", "service", "tls_versions", "cert_cn", "cert_issuer",
                     "cert_key", "cert_sig", "cert_not_after", "cert_expired",
@@ -482,8 +511,9 @@ def main():
                         " | ".join(s.get("weak", []))])
 
     if args.json:
-        with open(args.json, "w") as f:
-            json.dump({"summary": summaries, "rows": all_rows}, f, indent=2)
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump({"summary": summaries, "rows": all_rows}, f, indent=2,
+                      ensure_ascii=False)
 
     print(f"[+] Detay: {args.output}  Özet: {args.summary}", file=sys.stderr)
 
