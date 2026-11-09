@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tlsscan</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#fff; --ink:#1b1f24; --muted:#6b7280; --line:#e3e6ea;
+  --accent:#2563eb; --accent-ink:#fff; --shadow:0 1px 3px rgba(0,0,0,.08);
+  --g-strong:#16a34a; --g-med:#0ea5e9; --g-med1:#eab308; --g-weak:#f97316;
+  --g-vweak:#ef4444; --g-dep:#991b1b; --g-unc:#9ca3af;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0f1318; --panel:#171c22; --ink:#e7ebf0; --muted:#9aa4b0; --line:#2a313a;
+  --accent:#3b82f6; --shadow:0 1px 3px rgba(0,0,0,.4);
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{background:var(--panel);border-bottom:1px solid var(--line);padding:14px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+header h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.2px}
+header .tools{margin-left:auto;display:flex;gap:8px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.on{color:#16a34a;border-color:#16a34a55}
+.pill.off{color:#ef4444;border-color:#ef444455}
+main{max-width:1100px;margin:0 auto;padding:18px;display:grid;gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:16px}
+.card h2{font-size:14px;margin:0 0 12px;font-weight:650;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+textarea,select,input[type=number],input[type=text]{width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit}
+textarea{min-height:120px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.row>div{flex:1;min-width:120px}
+.opts{display:flex;gap:16px;align-items:end;flex-wrap:wrap;margin-top:12px}
+.chk{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--ink)}
+.chk input{width:auto}
+button{background:var(--accent);color:var(--accent-ink);border:0;border-radius:8px;padding:9px 18px;font:inherit;font-weight:600;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.bar{height:10px;border-radius:999px;background:var(--line);overflow:hidden;margin:6px 0}
+.bar>i{display:block;height:100%;background:var(--accent);transition:width .3s}
+.prog-list{max-height:180px;overflow:auto;font-family:ui-monospace,monospace;font-size:12px;border-top:1px solid var(--line);margin-top:10px;padding-top:8px}
+.prog-list div{display:flex;gap:10px;padding:1px 0}
+.prog-list .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px;cursor:pointer;user-select:none}
+tbody tr.sum{cursor:pointer}
+tbody tr.sum:hover{background:var(--bg)}
+.gradebars{display:flex;height:12px;border-radius:4px;overflow:hidden;min-width:120px;background:var(--line)}
+.gradebars i{height:100%}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.chip{border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:12px;cursor:pointer;user-select:none;background:var(--bg)}
+.chip.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;color:#fff;white-space:nowrap}
+.g-Güçlü{background:var(--g-strong)} .g-Orta{background:var(--g-med)}
+.g-OrtaSHA1{background:var(--g-med1);color:#3a2f00}
+.g-Zayıf{background:var(--g-weak)} .g-ÇokZayıf{background:var(--g-vweak)}
+.g-Deprecated{background:var(--g-dep)} .g-Unclassified{background:var(--g-unc)}
+.detail{background:var(--bg)}
+.detail td{padding:0}
+.detwrap{padding:12px 16px}
+.proto{margin:10px 0 4px;font-weight:650;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.vhead{font-weight:650;margin:8px 0 2px}
+.alg{display:flex;gap:8px;align-items:center;padding:2px 0;flex-wrap:wrap}
+.alg code{font-family:ui-monospace,monospace;font-size:12px}
+.alg .d{color:var(--muted);font-size:11px}
+.weakflag{color:var(--g-vweak);font-weight:700;font-size:11px}
+.state-open{color:#16a34a} .state-bad{color:#ef4444}
+.muted{color:var(--muted)}
+.empty{color:var(--muted);text-align:center;padding:30px}
+.hidden{display:none}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.toolbar input[type=text]{max-width:260px}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;margin-top:10px}
+.legend span{display:flex;align-items:center;gap:5px}
+.sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+.err{color:var(--g-vweak);font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔐 tlsscan</h1>
+  <span class="muted" style="font-size:12px">TLS/SSH/RDP algoritma taraması + PQC kademeli not</span>
+  <div class="tools" id="tools"></div>
+</header>
+<main>
+  <section class="card">
+    <h2>Tarama</h2>
+    <label for="targets">Hedefler (her satıra bir <code>ip:port</code> — IPv6 için <code>[::1]:443</code>)</label>
+    <textarea id="targets" placeholder="10.0.0.5:443&#10;10.0.0.6:22&#10;example.com:443"></textarea>
+    <div class="opts">
+      <div style="min-width:150px"><label for="engine">Motor</label>
+        <select id="engine">
+          <option value="auto">auto (nmap varsa nmap, yoksa python)</option>
+          <option value="python">python (saf Python, kurulum gerekmez)</option>
+          <option value="nmap">nmap</option>
+        </select></div>
+      <div style="max-width:110px"><label for="threads">Paralel</label>
+        <input type="number" id="threads" value="8" min="1" max="64"></div>
+      <div style="max-width:130px"><label for="ctimeout">Bağlantı timeout (sn)</label>
+        <input type="number" id="ctimeout" value="5" min="1" max="60"></div>
+      <label class="chk" style="margin-bottom:2px"><input type="checkbox" id="verify"> sslscan ile doğrula</label>
+      <button id="start">Taramayı başlat</button>
+    </div>
+    <div id="progress" class="hidden">
+      <div class="bar"><i id="pbar" style="width:0%"></i></div>
+      <div class="muted" id="pstat">Başlatılıyor…</div>
+      <div class="prog-list" id="plist"></div>
+    </div>
+    <div id="scanerr" class="err" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card" id="resultsCard" style="display:none">
+    <h2>Sonuçlar</h2>
+    <div id="agg"></div>
+    <div class="legend" id="legend"></div>
+    <div class="toolbar" style="margin-top:14px">
+      <input type="text" id="search" placeholder="hedef / servis / algoritma ara…">
+      <label class="chk"><input type="checkbox" id="onlyweak"> sadece zayıf</label>
+      <span style="flex:1"></span>
+      <a id="csv" href="/api/export.csv"><button class="ghost" type="button">CSV indir</button></a>
+    </div>
+    <div class="chips" id="gradechips"></div>
+    <table>
+      <thead><tr>
+        <th data-k="target">Hedef</th><th data-k="state">Durum</th>
+        <th data-k="service">Servis</th><th>Sürümler</th>
+        <th>Cipher notları</th><th data-k="weak_count">Zayıf</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty hidden" id="noresult">Filtreye uyan hedef yok.</div>
+  </section>
+</main>
+
+<script>
+const GRADES=["Güçlü","Orta","Orta (SHA1)","Zayıf","Çok Zayıf","Zayıf (Deprecated)","Unclassified"];
+const GCLASS={"Güçlü":"g-Güçlü","Orta":"g-Orta","Orta (SHA1)":"g-OrtaSHA1","Zayıf":"g-Zayıf",
+  "Çok Zayıf":"g-ÇokZayıf","Zayıf (Deprecated)":"g-Deprecated","Unclassified":"g-Unclassified"};
+const GVAR={"Güçlü":"--g-strong","Orta":"--g-med","Orta (SHA1)":"--g-med1","Zayıf":"--g-weak",
+  "Çok Zayıf":"--g-vweak","Zayıf (Deprecated)":"--g-dep","Unclassified":"--g-unc"};
+const PROTO={TLS:"TLS/SSL",CERT:"Sertifika",DH:"Diffie-Hellman",SSH:"SSH",RDP:"RDP",SSLSCAN:"sslscan ek"};
+const CAT={version:"Sürüm",cipher:"Cipher",compression:"Sıkıştırma",warning:"Uyarı",
+  "least-strength":"En düşük not",renegotiation:"Renegotiation","fallback-scsv":"Fallback SCSV",
+  "kex-group":"Kex grubu",subject:"Subject",issuer:"Issuer",san:"SAN","public-key":"Açık anahtar",
+  signature:"İmza",validity:"Geçerlilik","dh-params":"DH",kex_algorithms:"Kex",
+  server_host_key_algorithms:"Host key",encryption_algorithms:"Şifreleme",mac_algorithms:"MAC",
+  compression_algorithms:"Sıkıştırma","rdp-encryption":"Güvenlik protokolü",heartbleed:"Heartbleed",error:"Hata"};
+const $=s=>document.querySelector(s);
+let DATA={summaries:[],rows:[]}, rowsByTarget={}, activeGrade=null, pollTimer=null, sortKey="target", sortAsc=true;
+const esc=s=>String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const cvar=g=>getComputedStyle(document.documentElement).getPropertyValue(GVAR[g]||"--g-unc");
+
+async function loadTools(){
+  try{const t=await (await fetch("/api/tools")).json();
+    $("#tools").innerHTML=
+      `<span class="pill ${t.nmap?'on':'off'}">nmap ${t.nmap?'var':'yok'}</span>`+
+      `<span class="pill ${t.sslscan?'on':'off'}">sslscan ${t.sslscan?'var':'yok'}</span>`;
+    if(!t.sslscan) $("#verify").disabled=true;
+  }catch(e){}
+}
+
+$("#start").onclick=async()=>{
+  const body={targets:$("#targets").value,engine:$("#engine").value,
+    threads:+$("#threads").value,conn_timeout:+$("#ctimeout").value,verify:$("#verify").checked};
+  $("#scanerr").textContent="";
+  const r=await fetch("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json();
+  if(!r.ok){$("#scanerr").textContent=j.error||"Hata";return;}
+  $("#start").disabled=true;$("#progress").classList.remove("hidden");
+  $("#plist").innerHTML="";$("#resultsCard").style.display="none";
+  poll();
+};
+
+function poll(){clearTimeout(pollTimer);fetch("/api/status").then(r=>r.json()).then(st=>{
+  const pct=st.total?Math.round(st.completed/st.total*100):0;
+  $("#pbar").style.width=pct+"%";
+  $("#pstat").textContent=`${st.completed}/${st.total} tamamlandı · motor: ${st.engine||"?"}`+(st.running?" · taranıyor…":"");
+  const pl=$("#plist");
+  pl.innerHTML=st.progress.map(p=>{
+    const bad=p.state!=="open"&&!String(p.state).startsWith("open");
+    return `<div><span class="muted">[${p.i}]</span><span class="t">${esc(p.target)}</span>`+
+      `<span class="${bad?'state-bad':'state-open'}">${esc(p.state)}</span>`+
+      `<span class="muted">${esc(p.versions)}</span><span>${p.weak?'⚠ '+p.weak:''}</span></div>`;
+  }).join("");
+  pl.scrollTop=pl.scrollHeight;
+  if(st.error){$("#scanerr").textContent=st.error;$("#start").disabled=false;return;}
+  if(st.running){pollTimer=setTimeout(poll,1000);}
+  else if(st.done){$("#start").disabled=false;loadResults();}
+});}
+
+async function loadResults(){
+  DATA=await (await fetch("/api/results")).json();
+  rowsByTarget={};
+  DATA.rows.forEach(r=>{(rowsByTarget[r.target]=rowsByTarget[r.target]||[]).push(r);});
+  renderAgg();renderLegend();renderChips();render();
+  $("#resultsCard").style.display="";
+}
+
+function renderAgg(){
+  const tot={};GRADES.forEach(g=>tot[g]=0);let any=0;
+  DATA.summaries.forEach(s=>{for(const g in (s.grade_counts||{})){tot[g]+=s.grade_counts[g];any+=s.grade_counts[g];}});
+  const nTargets=DATA.summaries.length;
+  const nWeak=DATA.summaries.filter(s=>s.weak_count>0).length;
+  let bars=`<div class="gradebars" style="height:16px;margin-bottom:8px">`+
+    GRADES.map(g=>tot[g]?`<i title="${g}: ${tot[g]}" style="width:${tot[g]/any*100}%;background:${cvar(g)}"></i>`:"").join("")+`</div>`;
+  $("#agg").innerHTML=`<div class="muted" style="margin-bottom:6px">${nTargets} hedef · ${nWeak} tanesinde zayıf bulgu · ${any} cipher notlandı</div>`+(any?bars:"");
+}
+function renderLegend(){
+  $("#legend").innerHTML=GRADES.map(g=>`<span><i class="sw" style="background:${cvar(g)}"></i>${g}</span>`).join("");
+}
+function renderChips(){
+  $("#gradechips").innerHTML=`<span class="chip ${activeGrade===null?'active':''}" data-g="">Tümü</span>`+
+    GRADES.map(g=>`<span class="chip ${activeGrade===g?'active':''}" data-g="${g}">${g}</span>`).join("");
+  $("#gradechips").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{activeGrade=c.dataset.g||null;renderChips();render();});
+}
+
+function gradeBars(gc){
+  const tot=Object.values(gc||{}).reduce((a,b)=>a+b,0);
+  if(!tot)return '<span class="muted">—</span>';
+  return `<div class="gradebars" title="${GRADES.filter(g=>gc[g]).map(g=>g+': '+gc[g]).join(', ')}">`+
+    GRADES.map(g=>gc[g]?`<i style="width:${gc[g]/tot*100}%;background:${cvar(g)}"></i>`:"").join("")+`</div>`;
+}
+
+function matchRow(s){
+  const q=$("#search").value.trim().toLowerCase();
+  if($("#onlyweak").checked && !s.weak_count) return false;
+  if(activeGrade && !(s.grade_counts&&s.grade_counts[activeGrade])) return false;
+  if(q){
+    const inSum=(s.target+" "+s.service+" "+(s.tls_versions||[]).join(" ")).toLowerCase().includes(q);
+    const inAlg=(rowsByTarget[s.target]||[]).some(r=>(r.algorithm||"").toLowerCase().includes(q));
+    if(!inSum&&!inAlg)return false;
+  }
+  return true;
+}
+
+function render(){
+  let list=DATA.summaries.filter(matchRow);
+  list.sort((a,b)=>{let x=a[sortKey],y=b[sortKey];if(typeof x==="string"){x=x.toLowerCase();y=(y||"").toLowerCase();}
+    return (x>y?1:x<y?-1:0)*(sortAsc?1:-1);});
+  const tb=$("#tbody");tb.innerHTML="";
+  list.forEach(s=>{
+    const bad=s.state!=="open"&&!String(s.state).startsWith("open");
+    const tr=document.createElement("tr");tr.className="sum";
+    tr.innerHTML=`<td><b>${esc(s.target)}</b></td>`+
+      `<td class="${bad?'state-bad':'state-open'}">${esc(s.state)}</td>`+
+      `<td class="muted">${esc(s.service||"-")}</td>`+
+      `<td>${(s.tls_versions||[]).map(esc).join(" ")||'<span class="muted">—</span>'}</td>`+
+      `<td>${gradeBars(s.grade_counts)}</td>`+
+      `<td>${s.weak_count?'<span class="weakflag">⚠ '+s.weak_count+'</span>':'<span class="muted">0</span>'}</td>`;
+    const det=document.createElement("tr");det.className="detail hidden";
+    det.innerHTML=`<td colspan="6"><div class="detwrap">${detailHTML(s)}</div></td>`;
+    tr.onclick=()=>det.classList.toggle("hidden");
+    tb.appendChild(tr);tb.appendChild(det);
+  });
+  $("#noresult").classList.toggle("hidden",list.length>0);
+}
+
+function detailHTML(s){
+  const rows=rowsByTarget[s.target]||[];
+  const protos=[...new Set(rows.map(r=>r.protocol))];
+  let h="";
+  protos.forEach(p=>{
+    h+=`<div class="proto">${PROTO[p]||p}</div>`;
+    const prs=rows.filter(r=>r.protocol===p);
+    if(p==="TLS"){
+      const vers=[...new Set(prs.filter(r=>r.version).map(r=>r.version))];
+      vers.forEach(v=>{
+        h+=`<div class="vhead">${esc(v)}</div>`;
+        prs.filter(r=>r.version===v&&r.category!=="version").forEach(r=>h+=algLine(r));
+      });
+      prs.filter(r=>!r.version).forEach(r=>h+=algLine(r,true));
+    } else {
+      prs.forEach(r=>h+=algLine(r,true));
+    }
+  });
+  return h;
+}
+function algLine(r,showCat){
+  const g=r.grade?`<span class="badge ${GCLASS[r.grade]||'g-Unclassified'}">${esc(r.grade)}</span>`:"";
+  const cat=showCat&&r.category&&r.category!=="cipher"?`<span class="muted">${CAT[r.category]||r.category}:</span> `:"";
+  const d=r.detail?`<span class="d">${esc(r.detail)}</span>`:"";
+  const w=r.weak==="YES"?`<span class="weakflag">⚠</span>`:"";
+  const vf=r.verified&&r.verified!=="sslscan"?`<span class="muted">[${esc(r.verified)}]</span>`:"";
+  return `<div class="alg">${cat}<code>${esc(r.algorithm)}</code>${g}${d}${w}${vf}</div>`;
+}
+
+$("#search").oninput=render;$("#onlyweak").onchange=render;
+document.querySelectorAll("th[data-k]").forEach(th=>th.onclick=()=>{
+  const k=th.dataset.k;if(sortKey===k)sortAsc=!sortAsc;else{sortKey=k;sortAsc=true;}render();});
+loadTools();
+</script>
+</body>
+</html>

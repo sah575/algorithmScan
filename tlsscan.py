@@ -536,8 +536,10 @@ def build_report(summaries, rows):
     return "\n".join(out)
 
 
-def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=0.0):
-    """targets listesini paralel tarar; (rows, summaries) döner."""
+def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=0.0,
+              progress=None):
+    """targets listesini paralel tarar; (rows, summaries) döner.
+    progress(i, total, summ) verilirse her hedef bitince çağrılır (web arayüzü için)."""
     import random
     import time
     rows_all, summaries = [], []
@@ -550,6 +552,7 @@ def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=
             time.sleep(random.uniform(0, jitter))  # her bağlantıdan önce rastgele kısa bekleme
         return scan(h, p, timeout, engine, conn_timeout)
 
+    total = len(order)
     with ThreadPoolExecutor(max_workers=threads) as ex:
         futs = {ex.submit(one, h, p): (h, p) for h, p in order}
         for i, fut in enumerate(as_completed(futs), 1):
@@ -563,9 +566,38 @@ def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=
             summaries.append(summ)
             vers = ",".join(summ.get("tls_versions", [])) or ("SSH" if summ.get("ssh") else
                                                               "RDP" if summ.get("rdp") else "-")
-            print(f"[{label}{i}/{len(order)}] {summ['target']:<25} {summ.get('state',''):<9} "
+            print(f"[{label}{i}/{total}] {summ['target']:<25} {summ.get('state',''):<9} "
                   f"{vers}  weak={len(summ.get('weak', []))}", file=sys.stderr)
+            if progress:
+                try:
+                    progress(i, total, summ)
+                except Exception:
+                    pass
     return rows_all, summaries
+
+
+def finalize_grades(all_rows, summaries):
+    """TLS cipher'larına kademeli not verir, zayıf tiyerleri weak=YES yapar,
+    her hedefin weak listesini ve grade sayılarını satırlardan yeniden hesaplar.
+    CLI ve web arayüzü aynı sonucu üretsin diye ortak kullanılır."""
+    from collections import Counter
+    for r in all_rows:
+        if r.get("protocol") == "TLS" and r.get("category") == "cipher":
+            g = classify_cipher(r["algorithm"])
+            r["grade"] = g
+            r["weak"] = "YES" if g in GRADE_WEAK else ""
+        else:
+            r.setdefault("grade", "")
+    rows_by_t = {}
+    for r in all_rows:
+        rows_by_t.setdefault(r["target"], []).append(r)
+    for s in summaries:
+        rws = rows_by_t.get(s["target"], [])
+        s["weak"] = [f"{r['version'] or r['protocol']}:{r['algorithm']}"
+                     for r in rws if r["weak"] == "YES"]
+        gc = Counter(r["grade"] for r in rws if r.get("grade"))
+        s["grades"] = " ".join(f"{g}={gc[g]}" for g in GRADE_ORDER if gc.get(g))
+        s["grade_counts"] = {g: gc[g] for g in GRADE_ORDER if gc.get(g)}
 
 
 def incomplete(summ):
@@ -677,25 +709,8 @@ def main():
                     print(f"[v {i}/{len(todo)}] {s['target']:<25} {v.get('status')} "
                           f"confirmed={v.get('confirmed', '-')}", file=sys.stderr)
 
-    # Kademeli notlandırma: TLS cipher'larına grade ver, zayıf tiyerleri weak=YES yap
-    from collections import Counter
-    for r in all_rows:
-        if r.get("protocol") == "TLS" and r.get("category") == "cipher":
-            g = classify_cipher(r["algorithm"])
-            r["grade"] = g
-            r["weak"] = "YES" if g in GRADE_WEAK else ""
-        else:
-            r.setdefault("grade", "")
-    # weak listelerini ve grade sayılarını satırlardan yeniden hesapla (tutarlılık için)
-    rows_by_t = {}
-    for r in all_rows:
-        rows_by_t.setdefault(r["target"], []).append(r)
-    for s in summaries:
-        rws = rows_by_t.get(s["target"], [])
-        s["weak"] = [f"{r['version'] or r['protocol']}:{r['algorithm']}"
-                     for r in rws if r["weak"] == "YES"]
-        gc = Counter(r["grade"] for r in rws if r.get("grade"))
-        s["grades"] = " ".join(f"{g}={gc[g]}" for g in GRADE_ORDER if gc.get(g))
+    # Kademeli notlandırma (CLI + web ortak)
+    finalize_grades(all_rows, summaries)
 
     all_rows.sort(key=lambda r: r["target"])
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:

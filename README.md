@@ -11,6 +11,22 @@
 
 Varsayılan `--engine auto`: nmap varsa nmap, yoksa Python motoru kullanılır. İki motor da aynı CSV formatında çıktı üretir.
 
+Komut satırı (`tlsscan.py`) dışında bir de **web arayüzü** (`webui.py`) vardır — aşağıya bakın.
+
+## Web arayüzü
+
+Tarayıcıdan hedef girip tarama başlatmak ve sonuçları grade renkleriyle, filtrelenebilir bir tabloda görmek için:
+
+```bash
+python webui.py              # http://127.0.0.1:8765 otomatik açılır
+python webui.py --port 9000 --no-browser
+```
+
+- **Sadece Python standart kütüphanesi** kullanır (Flask vb. gerekmez; `tlsscan.py` ve `pyscan.py` ile aynı klasörde olmalı).
+- Sunucu yalnızca `127.0.0.1`'e bağlanır (dışarıya kapalı).
+- Özellikler: hedef listesi + motor/paralel/timeout/sslscan seçenekleri, **canlı ilerleme**, grade dağılımı çubuğu, arama + "sadece zayıf" + grade filtreleri, hedefe tıklayınca tüm algoritma detayları, **CSV indir**.
+- `tlsscan.py` ile aynı tarama motorunu ve notlandırmayı kullanır; aynı sonuçları üretir.
+
 ## Ne yapıyor?
 
 ### nmap motoru
