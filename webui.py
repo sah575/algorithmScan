@@ -22,17 +22,22 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+import time
+from datetime import datetime
+
 import tlsscan
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+HISTORY_DIR = os.path.join(HERE, "webui_history")
 
 # --------------------------------------------------------------------------
 # Tarama durumu (tek seferde bir tarama)
 # --------------------------------------------------------------------------
 LOCK = threading.Lock()
+STOP = threading.Event()
 STATE = {
-    "running": False, "done": False, "error": "",
-    "total": 0, "completed": 0, "engine": "",
+    "running": False, "done": False, "error": "", "stopped": False,
+    "total": 0, "completed": 0, "engine": "", "phase": "",
     "progress": [],       # [{i,target,state,versions,weak}]
     "rows": [], "summaries": [],
     "started": "", "params": {},
@@ -40,9 +45,11 @@ STATE = {
 
 
 def reset_state():
+    STOP.clear()
     with LOCK:
-        STATE.update({"running": True, "done": False, "error": "", "total": 0,
-                      "completed": 0, "progress": [], "rows": [], "summaries": []})
+        STATE.update({"running": True, "done": False, "error": "", "stopped": False,
+                      "total": 0, "completed": 0, "progress": [], "phase": "",
+                      "rows": [], "summaries": []})
 
 
 def scan_worker(params):
@@ -66,30 +73,75 @@ def scan_worker(params):
             STATE["total"] = len(targets)
             STATE["engine"] = engine
 
+        counter = {"n": 0}
+
         def on_progress(i, total, summ):
             vers = ",".join(summ.get("tls_versions", [])) or (
                 "SSH" if summ.get("ssh") else "RDP" if summ.get("rdp") else "-")
             with LOCK:
-                STATE["completed"] = i
+                counter["n"] += 1
+                STATE["completed"] = counter["n"]
                 STATE["progress"].append({
-                    "i": i, "target": summ.get("target", ""),
+                    "i": counter["n"], "target": summ.get("target", ""),
                     "state": summ.get("state", ""), "versions": vers,
                     "weak": len(summ.get("weak", []))})
 
         rows, summaries = tlsscan.run_scans(
             targets, params["threads"], 120, engine, params["conn_timeout"],
-            progress=on_progress)
+            progress=on_progress, stop_event=STOP)
+
+        # Yeniden tarama turları (ulaşılamayan / yarım kalan hedefler)
+        by_t = {s["target"]: s for s in summaries}
+        for rnd in range(1, params.get("retry", 0) + 1):
+            if STOP.is_set():
+                break
+            retry_targets = [(s["host"], s["port"]) for s in summaries
+                             if tlsscan.incomplete(s) and "host" in s]
+            if not retry_targets:
+                break
+            with LOCK:
+                STATE["phase"] = (f"yeniden tarama turu {rnd}/{params['retry']} "
+                                  f"({len(retry_targets)} hedef, bekleniyor…)")
+                STATE["total"] += len(retry_targets)
+            waited = 0
+            while waited < params.get("retry_wait", 30) and not STOP.is_set():
+                time.sleep(0.5)
+                waited += 0.5
+            if STOP.is_set():
+                break
+            with LOCK:
+                STATE["phase"] = f"yeniden tarama turu {rnd}/{params['retry']}"
+            ct = params["conn_timeout"] + 5 * rnd
+            r_rows, r_summ = tlsscan.run_scans(
+                retry_targets, params.get("retry_threads", 2), 120, engine, ct,
+                label=f"R{rnd} ", jitter=2.0, progress=on_progress, stop_event=STOP)
+            for s in r_summ:
+                old = by_t.get(s["target"])
+                if old is None:
+                    continue
+                better = (not tlsscan.incomplete(s)) or (
+                    tlsscan.incomplete(old) and
+                    len(s.get("weak", [])) >= len(old.get("weak", [])))
+                if better:
+                    rows = [r for r in rows if r["target"] != s["target"]]
+                    rows.extend([r for r in r_rows if r["target"] == s["target"]])
+                    summaries[summaries.index(old)] = s
+                    by_t[s["target"]] = s
 
         # İsteğe bağlı sslscan doğrulaması
-        if params.get("verify") and shutil.which("sslscan"):
-            by_t = {}
+        if params.get("verify") and shutil.which("sslscan") and not STOP.is_set():
+            with LOCK:
+                STATE["phase"] = "sslscan doğrulaması"
+            bt = {}
             for r in rows:
-                by_t.setdefault(r["target"], []).append(r)
+                bt.setdefault(r["target"], []).append(r)
             todo = [s for s in summaries
-                    if tlsscan.needs_verify(s, by_t.get(s["target"], []))]
+                    if tlsscan.needs_verify(s, bt.get(s["target"], []))]
             for s in todo:
+                if STOP.is_set():
+                    break
                 try:
-                    rows.extend(tlsscan.verify_target(s, by_t[s["target"]], 120))
+                    rows.extend(tlsscan.verify_target(s, bt[s["target"]], 120))
                 except Exception as e:
                     s["sslscan"] = {"status": f"error: {e}"}
 
@@ -102,6 +154,9 @@ def scan_worker(params):
             STATE["summaries"] = summaries
             STATE["running"] = False
             STATE["done"] = True
+            STATE["stopped"] = STOP.is_set()
+            STATE["phase"] = ""
+        save_history(params, summaries, rows)
     except Exception as e:
         with LOCK:
             STATE["error"] = f"{type(e).__name__}: {e}"
@@ -144,6 +199,68 @@ def build_csv():
     return out.getvalue()
 
 
+def build_txt():
+    with LOCK:
+        return tlsscan.build_report(STATE["summaries"], STATE["rows"])
+
+
+def build_json():
+    with LOCK:
+        return json.dumps({"summaries": STATE["summaries"], "rows": STATE["rows"]},
+                          ensure_ascii=False, indent=2)
+
+
+# --------------------------------------------------------------------------
+# Geçmiş taramalar (yerel diske JSON olarak kaydedilir)
+# --------------------------------------------------------------------------
+def save_history(params, summaries, rows):
+    try:
+        os.makedirs(HISTORY_DIR, exist_ok=True)
+        hid = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # hedef listesini kaydetmeye gerek yok; sadece özet+satırlar
+        safe_params = {k: params.get(k) for k in
+                       ("engine", "threads", "conn_timeout", "verify", "retry")}
+        nweak = sum(1 for s in summaries if s.get("weak"))
+        rec = {"id": hid, "time": datetime.now().isoformat(timespec="seconds"),
+               "params": safe_params, "n_targets": len(summaries), "n_weak": nweak,
+               "summaries": summaries, "rows": rows}
+        with open(os.path.join(HISTORY_DIR, hid + ".json"), "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False)
+    except Exception:
+        pass  # geçmiş kaydı başarısız olsa da tarama sonucu etkilenmesin
+
+
+def list_history():
+    out = []
+    if not os.path.isdir(HISTORY_DIR):
+        return out
+    for fn in sorted(os.listdir(HISTORY_DIR), reverse=True):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(HISTORY_DIR, fn), encoding="utf-8") as f:
+                d = json.load(f)
+            out.append({"id": d["id"], "time": d.get("time", ""),
+                        "n_targets": d.get("n_targets", 0), "n_weak": d.get("n_weak", 0),
+                        "params": d.get("params", {})})
+        except Exception:
+            continue
+    return out
+
+
+def load_history(hid):
+    if not hid or "/" in hid or "\\" in hid or ".." in hid:
+        return None
+    p = os.path.join(HISTORY_DIR, hid + ".json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------
 # HTTP sunucu
 # --------------------------------------------------------------------------
@@ -182,6 +299,7 @@ class Handler(BaseHTTPRequestHandler):
                     "running": STATE["running"], "done": STATE["done"],
                     "error": STATE["error"], "total": STATE["total"],
                     "completed": STATE["completed"], "engine": STATE["engine"],
+                    "phase": STATE["phase"], "stopped": STATE["stopped"],
                     "progress": STATE["progress"][-200:]})
         elif path == "/api/results":
             with LOCK:
@@ -194,11 +312,35 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/export.csv":
             self._send(200, build_csv(), "text/csv; charset=utf-8",
                        {"Content-Disposition": "attachment; filename=tls_results.csv"})
+        elif path == "/api/export.txt":
+            self._send(200, build_txt(), "text/plain; charset=utf-8",
+                       {"Content-Disposition": "attachment; filename=tls_report.txt"})
+        elif path == "/api/export.json":
+            self._send(200, build_json(), "application/json; charset=utf-8",
+                       {"Content-Disposition": "attachment; filename=tls_results.json"})
+        elif path == "/api/history":
+            self._json(200, {"history": list_history()})
+        elif path == "/api/history/get":
+            hid = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+            rec = load_history(hid)
+            if rec is None:
+                self._json(404, {"error": "Kayıt bulunamadı."})
+                return
+            with LOCK:
+                if not STATE["running"]:  # dışa aktarma bu kayıttan olsun
+                    STATE["rows"] = rec.get("rows", [])
+                    STATE["summaries"] = rec.get("summaries", [])
+            self._json(200, {"summaries": [summary_view(s) for s in rec.get("summaries", [])],
+                             "rows": rec.get("rows", [])})
         else:
             self._send(404, "bulunamadı", "text/plain; charset=utf-8")
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/stop":
+            STOP.set()
+            self._json(200, {"ok": True})
+            return
         if path != "/api/scan":
             self._send(404, "bulunamadı", "text/plain; charset=utf-8")
             return
@@ -218,6 +360,9 @@ class Handler(BaseHTTPRequestHandler):
             "threads": max(1, min(int(data.get("threads", 8) or 8), 64)),
             "conn_timeout": max(1, min(int(data.get("conn_timeout", 5) or 5), 60)),
             "verify": bool(data.get("verify", False)),
+            "retry": max(0, min(int(data.get("retry", 0) or 0), 5)),
+            "retry_wait": max(0, min(int(data.get("retry_wait", 30) or 30), 600)),
+            "retry_threads": 2,
         }
         reset_state()
         with LOCK:

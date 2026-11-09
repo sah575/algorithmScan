@@ -537,9 +537,10 @@ def build_report(summaries, rows):
 
 
 def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=0.0,
-              progress=None):
+              progress=None, stop_event=None):
     """targets listesini paralel tarar; (rows, summaries) döner.
-    progress(i, total, summ) verilirse her hedef bitince çağrılır (web arayüzü için)."""
+    progress(i, total, summ) verilirse her hedef bitince çağrılır (web arayüzü için).
+    stop_event set edilirse tarama erken kesilir, o ana kadarki sonuçlar döner."""
     import random
     import time
     rows_all, summaries = [], []
@@ -553,7 +554,9 @@ def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=
         return scan(h, p, timeout, engine, conn_timeout)
 
     total = len(order)
-    with ThreadPoolExecutor(max_workers=threads) as ex:
+    ex = ThreadPoolExecutor(max_workers=threads)
+    stopped = False
+    try:
         futs = {ex.submit(one, h, p): (h, p) for h, p in order}
         for i, fut in enumerate(as_completed(futs), 1):
             h, p = futs[fut]
@@ -573,6 +576,14 @@ def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=
                     progress(i, total, summ)
                 except Exception:
                     pass
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                break
+    finally:
+        try:
+            ex.shutdown(wait=not stopped, cancel_futures=stopped)
+        except TypeError:  # Python < 3.9: cancel_futures yok
+            ex.shutdown(wait=False)
     return rows_all, summaries
 
 

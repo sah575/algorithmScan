@@ -4,6 +4,7 @@ __pycache__/
 
 # Hassas veri / çalışma dosyaları (ASLA commit edilmez)
 Quantum-Safe/
+webui_history/
 agent.txt
 
 # Tarama çıktıları (kullanıcıya özel, repoya girmez)

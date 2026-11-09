@@ -76,6 +76,17 @@ tbody tr.sum:hover{background:var(--bg)}
 .legend span{display:flex;align-items:center;gap:5px}
 .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
 .err{color:var(--g-vweak);font-weight:600}
+button.danger{background:var(--g-vweak)}
+#drop{position:relative}
+#drop.dragover textarea{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg))}
+.drophint{font-size:12px;margin-top:4px}
+.filelink{color:var(--accent);cursor:pointer;text-decoration:underline;display:inline}
+#fname{margin-left:6px;font-style:italic}
+.hist-row{display:flex;gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
+.hist-row:last-child{border-bottom:0}
+.hist-row .when{font-family:ui-monospace,monospace;font-size:12px}
+.hist-row .meta{color:var(--muted);flex:1}
+.hist-row button{padding:4px 12px;font-size:12px}
 </style>
 </head>
 <body>
@@ -88,7 +99,13 @@ tbody tr.sum:hover{background:var(--bg)}
   <section class="card">
     <h2>Tarama</h2>
     <label for="targets">Hedefler (her satıra bir <code>ip:port</code> — IPv6 için <code>[::1]:443</code>)</label>
-    <textarea id="targets" placeholder="10.0.0.5:443&#10;10.0.0.6:22&#10;example.com:443"></textarea>
+    <div id="drop">
+      <textarea id="targets" placeholder="10.0.0.5:443&#10;10.0.0.6:22&#10;example.com:443"></textarea>
+      <div class="drophint muted">Dosyayı buraya sürükleyip bırakabilir ya da
+        <label for="file" class="filelink">dosya seçebilirsiniz</label> (.txt/.csv).
+        <input type="file" id="file" accept=".txt,.csv,text/plain" class="hidden">
+        <span id="fname"></span></div>
+    </div>
     <div class="opts">
       <div style="min-width:150px"><label for="engine">Motor</label>
         <select id="engine">
@@ -96,12 +113,17 @@ tbody tr.sum:hover{background:var(--bg)}
           <option value="python">python (saf Python, kurulum gerekmez)</option>
           <option value="nmap">nmap</option>
         </select></div>
-      <div style="max-width:110px"><label for="threads">Paralel</label>
+      <div style="max-width:100px"><label for="threads">Paralel</label>
         <input type="number" id="threads" value="8" min="1" max="64"></div>
-      <div style="max-width:130px"><label for="ctimeout">Bağlantı timeout (sn)</label>
+      <div style="max-width:120px"><label for="ctimeout">Timeout (sn)</label>
         <input type="number" id="ctimeout" value="5" min="1" max="60"></div>
+      <div style="max-width:100px"><label for="retry">Retry turu</label>
+        <input type="number" id="retry" value="0" min="0" max="5" title="Ulaşılamayan/yarım kalan hedefleri yeniden tara"></div>
+      <div style="max-width:120px"><label for="retrywait">Retry bekleme (sn)</label>
+        <input type="number" id="retrywait" value="30" min="0" max="600"></div>
       <label class="chk" style="margin-bottom:2px"><input type="checkbox" id="verify"> sslscan ile doğrula</label>
       <button id="start">Taramayı başlat</button>
+      <button id="stop" class="danger hidden" type="button">Durdur</button>
     </div>
     <div id="progress" class="hidden">
       <div class="bar"><i id="pbar" style="width:0%"></i></div>
@@ -119,7 +141,10 @@ tbody tr.sum:hover{background:var(--bg)}
       <input type="text" id="search" placeholder="hedef / servis / algoritma ara…">
       <label class="chk"><input type="checkbox" id="onlyweak"> sadece zayıf</label>
       <span style="flex:1"></span>
-      <a id="csv" href="/api/export.csv"><button class="ghost" type="button">CSV indir</button></a>
+      <button class="ghost" type="button" id="btnPdf">Rapor (PDF/yazdır)</button>
+      <a href="/api/export.csv" download><button class="ghost" type="button">CSV</button></a>
+      <a href="/api/export.txt" download><button class="ghost" type="button">TXT</button></a>
+      <a href="/api/export.json" download><button class="ghost" type="button">JSON</button></a>
     </div>
     <div class="chips" id="gradechips"></div>
     <table>
@@ -131,6 +156,11 @@ tbody tr.sum:hover{background:var(--bg)}
       <tbody id="tbody"></tbody>
     </table>
     <div class="empty hidden" id="noresult">Filtreye uyan hedef yok.</div>
+  </section>
+
+  <section class="card">
+    <h2>Geçmiş taramalar</h2>
+    <div id="history" class="muted">Yükleniyor…</div>
   </section>
 </main>
 
@@ -163,20 +193,34 @@ async function loadTools(){
 
 $("#start").onclick=async()=>{
   const body={targets:$("#targets").value,engine:$("#engine").value,
-    threads:+$("#threads").value,conn_timeout:+$("#ctimeout").value,verify:$("#verify").checked};
+    threads:+$("#threads").value,conn_timeout:+$("#ctimeout").value,verify:$("#verify").checked,
+    retry:+$("#retry").value,retry_wait:+$("#retrywait").value};
   $("#scanerr").textContent="";
   const r=await fetch("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const j=await r.json();
   if(!r.ok){$("#scanerr").textContent=j.error||"Hata";return;}
-  $("#start").disabled=true;$("#progress").classList.remove("hidden");
+  $("#start").disabled=true;$("#stop").classList.remove("hidden");
+  $("#progress").classList.remove("hidden");
   $("#plist").innerHTML="";$("#resultsCard").style.display="none";
   poll();
 };
+$("#stop").onclick=async()=>{$("#stop").disabled=true;
+  await fetch("/api/stop",{method:"POST"});};
+
+// Dosyadan hedef yükleme + sürükle-bırak
+$("#file").onchange=e=>{const f=e.target.files[0];if(f)readTargets(f);};
+function readTargets(f){const r=new FileReader();r.onload=()=>{
+  $("#targets").value=r.result;$("#fname").textContent="— "+f.name;};r.readAsText(f);}
+const drop=$("#drop");
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("dragover");}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();if(ev==="dragleave"&&e.target!==drop)return;drop.classList.remove("dragover");}));
+drop.addEventListener("drop",e=>{const f=e.dataTransfer.files[0];if(f)readTargets(f);});
 
 function poll(){clearTimeout(pollTimer);fetch("/api/status").then(r=>r.json()).then(st=>{
-  const pct=st.total?Math.round(st.completed/st.total*100):0;
+  const pct=st.total?Math.round(Math.min(st.completed,st.total)/st.total*100):0;
   $("#pbar").style.width=pct+"%";
-  $("#pstat").textContent=`${st.completed}/${st.total} tamamlandı · motor: ${st.engine||"?"}`+(st.running?" · taranıyor…":"");
+  $("#pstat").textContent=`${st.completed}/${st.total} tamamlandı · motor: ${st.engine||"?"}`
+    +(st.phase?" · "+st.phase:"")+(st.running?" · taranıyor…":st.stopped?" · durduruldu":"");
   const pl=$("#plist");
   pl.innerHTML=st.progress.map(p=>{
     const bad=p.state!=="open"&&!String(p.state).startsWith("open");
@@ -185,9 +229,11 @@ function poll(){clearTimeout(pollTimer);fetch("/api/status").then(r=>r.json()).t
       `<span class="muted">${esc(p.versions)}</span><span>${p.weak?'⚠ '+p.weak:''}</span></div>`;
   }).join("");
   pl.scrollTop=pl.scrollHeight;
-  if(st.error){$("#scanerr").textContent=st.error;$("#start").disabled=false;return;}
+  if(st.error){$("#scanerr").textContent=st.error;$("#start").disabled=false;
+    $("#stop").classList.add("hidden");$("#stop").disabled=false;return;}
   if(st.running){pollTimer=setTimeout(poll,1000);}
-  else if(st.done){$("#start").disabled=false;loadResults();}
+  else if(st.done){$("#start").disabled=false;$("#stop").classList.add("hidden");
+    $("#stop").disabled=false;loadResults();loadHistory();}
 });}
 
 async function loadResults(){
@@ -289,7 +335,80 @@ function algLine(r,showCat){
 $("#search").oninput=render;$("#onlyweak").onchange=render;
 document.querySelectorAll("th[data-k]").forEach(th=>th.onclick=()=>{
   const k=th.dataset.k;if(sortKey===k)sortAsc=!sortAsc;else{sortKey=k;sortAsc=true;}render();});
-loadTools();
+
+// Geçmiş taramalar
+async function loadHistory(){
+  try{const h=(await (await fetch("/api/history")).json()).history||[];
+    if(!h.length){$("#history").innerHTML='<span class="muted">Henüz kayıt yok.</span>';return;}
+    $("#history").innerHTML=h.map(x=>{
+      const t=x.time.replace("T"," ");
+      return `<div class="hist-row"><span class="when">${esc(t)}</span>`+
+        `<span class="meta">${x.n_targets} hedef · ${x.n_weak} zayıf · motor ${esc(x.params.engine||'?')}`+
+        `${x.params.verify?' · sslscan':''}</span>`+
+        `<button data-id="${esc(x.id)}">Aç</button></div>`;}).join("");
+    $("#history").querySelectorAll("button").forEach(b=>b.onclick=()=>openHistory(b.dataset.id));
+  }catch(e){$("#history").innerHTML='<span class="err">Geçmiş yüklenemedi.</span>';}
+}
+async function openHistory(id){
+  const r=await fetch("/api/history/get?id="+encodeURIComponent(id));
+  if(!r.ok)return;
+  DATA=await r.json();rowsByTarget={};
+  DATA.rows.forEach(r=>{(rowsByTarget[r.target]=rowsByTarget[r.target]||[]).push(r);});
+  renderAgg();renderLegend();renderChips();render();
+  $("#resultsCard").style.display="";
+  $("#resultsCard").scrollIntoView({behavior:"smooth"});
+}
+
+// PDF / yazdırılabilir rapor (ayrı pencere + tarayıcının "PDF olarak kaydet")
+$("#btnPdf").onclick=()=>{
+  const w=window.open("","_blank");if(!w){alert("Pop-up engellendi; izin verin.");return;}
+  const now=new Date().toLocaleString("tr-TR");
+  const gcell=g=>`<span style="display:inline-block;padding:1px 7px;border-radius:9px;color:#fff;font-size:11px;background:${cvar(g)}">${g}</span>`;
+  let body=`<h1>tlsscan raporu</h1><div class="meta">Oluşturma: ${now} · ${DATA.summaries.length} hedef</div>`;
+  DATA.summaries.forEach(s=>{
+    const bad=s.state!=="open"&&!String(s.state).startsWith("open");
+    body+=`<div class="tgt"><h2>${esc(s.target)}</h2>`+
+      `<div class="meta">durum: <b style="color:${bad?'#b91c1c':'#15803d'}">${esc(s.state)}</b> · `+
+      `servis: ${esc(s.service||'-')} · zayıf bulgu: ${s.weak_count}</div>`;
+    const gc=s.grade_counts||{};
+    const gline=GRADES.filter(g=>gc[g]).map(g=>gcell(g)+" "+gc[g]).join("  ");
+    if(gline)body+=`<div class="meta">cipher notları: ${gline}</div>`;
+    const rows=rowsByTarget[s.target]||[];
+    const protos=[...new Set(rows.map(r=>r.protocol))];
+    protos.forEach(p=>{
+      body+=`<h3>${PROTO[p]||p}</h3>`;
+      const prs=rows.filter(r=>r.protocol===p);
+      if(p==="TLS"){
+        [...new Set(prs.filter(r=>r.version).map(r=>r.version))].forEach(v=>{
+          body+=`<div class="vh">${esc(v)}</div><ul>`;
+          prs.filter(r=>r.version===v&&r.category!=="version").forEach(r=>{body+=repLine(r);});
+          body+=`</ul>`;});
+        const rest=prs.filter(r=>!r.version);
+        if(rest.length){body+="<ul>";rest.forEach(r=>body+=repLine(r,true));body+="</ul>";}
+      }else{body+="<ul>";prs.forEach(r=>body+=repLine(r,true));body+="</ul>";}
+    });
+    body+=`</div>`;
+  });
+  function repLine(r,showCat){
+    const g=r.grade?" "+gcell(r.grade):"";
+    const cat=showCat&&r.category&&r.category!=="cipher"?`<b>${CAT[r.category]||r.category}:</b> `:"";
+    const w=r.weak==="YES"?' <span style="color:#b91c1c;font-weight:700">⚠</span>':"";
+    const d=r.detail?` <span class="d">(${esc(r.detail)})</span>`:"";
+    return `<li>${cat}<code>${esc(r.algorithm)}</code>${g}${d}${w}</li>`;
+  }
+  w.document.write(`<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>tlsscan raporu</title>
+  <style>body{font:13px/1.5 system-ui,sans-serif;color:#111;max-width:900px;margin:24px auto;padding:0 16px}
+  h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:0 0 2px;border-bottom:2px solid #333;padding-bottom:2px}
+  h3{font-size:13px;margin:12px 0 2px;color:#444;text-transform:uppercase;letter-spacing:.4px}
+  .tgt{margin:22px 0;page-break-inside:avoid}.meta{color:#555;font-size:12px;margin-bottom:4px}
+  .vh{font-weight:700;margin:6px 0 1px}ul{margin:2px 0 8px;padding-left:20px}li{margin:1px 0}
+  code{font-family:ui-monospace,Consolas,monospace;font-size:12px}.d{color:#777;font-size:11px}
+  @media print{.tgt{page-break-inside:avoid}}</style></head><body>${body}
+  <script>window.onload=()=>setTimeout(()=>window.print(),300)<\/script></body></html>`);
+  w.document.close();
+};
+
+loadTools();loadHistory();
 </script>
 </body>
 </html>
