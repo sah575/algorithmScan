@@ -408,7 +408,12 @@ $("#btnPdf").onclick=()=>{
   w.document.close();
 };
 
-loadTools();loadHistory();
+// Açılışta son tamamlanmış tarama varsa göster
+async function initResults(){
+  try{const st=await (await fetch("/api/status")).json();
+    if(st.done && !st.running) loadResults();}catch(e){}
+}
+loadTools();loadHistory();initResults();
 </script>
 </body>
 </html>
