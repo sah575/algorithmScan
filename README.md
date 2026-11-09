@@ -156,6 +156,24 @@ Tarama sırasında her hedef bitince bir ilerleme satırı yazılır:
 
 `weak=N`, o hedefte zayıf (`[ZAYIF]` / `weak=YES`) işaretlenen **kaç şey olduğunu** gösterir (bir sayı, bir seçenek değil): zayıf TLS sürümleri, cipher'lar, sertifika sorunları, SSH algoritmaları vb. `weak=0` hiçbir zayıflık bulunmadığı, `weak=3` üç zayıf bulgu olduğu anlamına gelir. Hangi bulguların zayıf olduğu raporda (`[ZAYIF]` etiketi) ve `tls_summary.csv` → `weak_items` sütununda yazar.
 
+### Cipher kademeli notu (grade)
+
+Her TLS cipher'ına, ikili zayıf/değil ayrımının yanında bir **kademeli not** verilir (kurum PQC envanter çalışmasının mantığına göre). Böylece "ne zayıf ne güçlü" olan orta seviye cipher'lar da görünür. Not, cipher adından dört eksene bakılarak kural tabanlı hesaplanır: şifreleme modu (AEAD > CBC), hash (SHA-2 > SHA-1 > MD5/yok), anahtar uzunluğu (256 > 128; kuantum/Grover 128 biti efektif 64'e indirir) ve eski/kırık primitifler.
+
+| Not | Anlamı | Örnek | weak? |
+|---|---|---|---|
+| **Güçlü** | AEAD (GCM/CCM/CHACHA20-POLY1305) + SHA-2 | `ECDHE-RSA-AES256-GCM-SHA384`, TLS 1.3 suitleri | hayır |
+| **Orta** | CBC + SHA-2 | `AES128-SHA256`, `CAMELLIA256-SHA256` | hayır |
+| **Orta (SHA1)** | 256-bit CBC + SHA-1 | `AES256-SHA`, `ECDHE-RSA-AES256-SHA` | hayır |
+| **Zayıf** | 128-bit CBC + SHA-1, ama eliptik FS (ECDHE/AECDH) | `ECDHE-RSA-AES128-SHA` | **evet** |
+| **Çok Zayıf** | 128-bit CBC + SHA-1, FS yok / export | `AES128-SHA`, `DHE-RSA-AES128-SHA` | **evet** |
+| **Zayıf (Deprecated)** | Eski/kırık primitif | 3DES, RC4, NULL, SEED, DES, MD5 | **evet** |
+| **Unclassified** | Kural kapsamı dışı | (nadir) | hayır |
+
+Not `tls_results.csv` → `grade` sütununda ve raporda her cipher'ın yanında (`[Güçlü]`, `[Orta]`, …) yer alır. Özet CSV'deki `grade_counts` ve raporun başlığındaki `cipher notları` satırı hedef başına dağılımı verir (`Güçlü=11 Orta=6 ...`). `Zayıf`, `Çok Zayıf` ve `Zayıf (Deprecated)` olanlar ayrıca `weak=YES` sayılır — yani bu notlandırma, daha önce hiç işaretlemediğimiz `AES128-SHA` gibi cipher'ları da artık zayıf olarak yakalar.
+
+> **PQC notu:** Bu notlandırma klasik + yakın vade sertleştirme odaklıdır. Gerçek kuantum güvenliği için anahtar değişiminin de (RSA/DH/ECDH/ECDSA — hepsi Shor algoritmasıyla kırılabilir) ML-KEM/ML-DSA gibi PQC algoritmalarıyla hibritlenmesi gerekir; bu araç mevcut TLS yapılandırmasını ölçer, PQC geçişini değil.
+
 Tarama bitince her hedefin sürümleri ve algoritmaları ekrana yazdırılır ve `tls_report.txt` dosyasına kaydedilir:
 
 ```text
@@ -193,7 +211,7 @@ SSH hedeflerinde `tls_version` sütunu `SSH-2` olur. (Zayıf/güvenli ayrımı v
 
 ### `tls_results.csv`: detay
 
-Sütunlar: `target, service, protocol, version, category, algorithm, detail, weak, verified`
+Sütunlar: `target, service, protocol, version, category, algorithm, detail, weak, grade, verified`
 
 | protocol | category değerleri |
 |---|---|
@@ -214,7 +232,7 @@ Zayıf bulguları süzmek için: `grep ',YES,' tls_results.csv`
 
 ### `tls_summary.csv`: özet
 
-Her hedef için tek satır: `target, state, service, tls_versions, cert_cn, cert_issuer, cert_key, cert_sig, cert_not_after, cert_expired, cert_self_signed, dh_issues, ssh, rdp, sslscan_status, sslscan_confirmed, heartbleed, insecure_reneg, fallback_scsv, kex_groups, weak_count, weak_items`
+Her hedef için tek satır: `target, state, service, tls_versions, cert_cn, cert_issuer, cert_key, cert_sig, cert_not_after, cert_expired, cert_self_signed, dh_issues, ssh, rdp, sslscan_status, sslscan_confirmed, heartbleed, insecure_reneg, fallback_scsv, kex_groups, grade_counts, weak_count, weak_items`
 
 `insecure_reneg`, `fallback_scsv` ve `kex_groups` Python motorunda kendi testlerinden, nmap motorunda ise `--verify` ile sslscan'den doldurulur. `heartbleed` sadece sslscan ile doldurulur.
 

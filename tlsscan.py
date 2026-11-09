@@ -37,7 +37,50 @@ WEAK_SSH = re.compile(
 )
 
 FIELDS = ["target", "service", "protocol", "version", "category", "algorithm",
-          "detail", "weak", "verified"]
+          "detail", "weak", "grade", "verified"]
+
+# ---------------------------------------------------------------------------
+# Cipher suite kademeli notlandırma (PQC envanter çalışmasının mantığına göre)
+# Eksenler: şifreleme modu (AEAD > CBC), hash (SHA-2 > SHA-1 > MD5/yok),
+# anahtar uzunluğu (256 > 128; kuantum/Grover 128'i efektif 64 bite indirir) ve
+# eski/kırık primitifler. Çalışmadaki Table2/PQC etiketleriyle aynı set kullanılır.
+# ---------------------------------------------------------------------------
+GRADE_WEAK = {"Zayıf", "Çok Zayıf", "Zayıf (Deprecated)"}
+GRADE_ORDER = ["Güçlü", "Orta", "Orta (SHA1)", "Zayıf", "Çok Zayıf",
+               "Zayıf (Deprecated)", "Unclassified"]
+
+
+def classify_cipher(name):
+    """Cipher adını (OpenSSL ya da IANA biçimi) kademeli nota çevirir."""
+    n = (name or "").upper().replace("-", "_")
+    if not n or n.startswith("0X"):
+        return ""  # ham id, isim yok
+    if "NULL" in n:
+        return "Zayıf (Deprecated)"              # şifrelemesiz
+    if "EXPORT" in n or n.startswith("EXP"):
+        return "Çok Zayıf"                        # export-grade
+    if any(t in n for t in ("RC4", "RC2", "3DES", "DES_EDE", "DES_CBC", "_DES_",
+                            "MD5", "IDEA", "SEED")):
+        return "Zayıf (Deprecated)"              # eski/kırık primitifler
+    bits = 256 if "256" in n else (192 if "192" in n else (128 if "128" in n else 0))
+    if "SHA384" in n or "SHA256" in n or "SHA512" in n:
+        sha = 2
+    elif n.endswith("SHA") or "_SHA_" in n:
+        sha = 1
+    else:
+        sha = 0
+    aead = "GCM" in n or "CCM" in n or "CHACHA20" in n or "POLY1305" in n
+    if aead:
+        return "Güçlü"                            # AEAD
+    if sha == 2:
+        return "Orta"                             # CBC + SHA-2
+    if sha == 1:
+        if bits >= 256:
+            return "Orta (SHA1)"                  # 256-bit CBC + SHA-1
+        if "ECDHE" in n or "AECDH" in n:
+            return "Zayıf"                        # 128-bit SHA-1 ama eliptik FS
+        return "Çok Zayıf"                        # 128-bit SHA-1, FS yok
+    return "Unclassified"
 
 
 def parse_target(line):
@@ -448,6 +491,8 @@ def build_report(summaries, rows):
         out.append("=" * 78)
         out.append(f"{s['target']}   durum: {s.get('state', '')}   servis: "
                    f"{s.get('service', '') or '-'}   weak: {len(s.get('weak', []))}")
+        if s.get("grades"):
+            out.append(f"  cipher notları: {s['grades']}")
         trs = by_target.get(s["target"], [])
         if not trs:
             out.append("  (sonuç yok)")
@@ -476,7 +521,8 @@ def build_report(summaries, rows):
                         label = "" if r["category"] == "cipher" else \
                             CATEGORY_LABELS.get(r["category"], r["category"]) + ": "
                         detail = f"  ({r['detail']})" if r["detail"] else ""
-                        out.append(f"      - {label}{r['algorithm']}{detail}{_mark(r)}")
+                        grade = f"  [{r['grade']}]" if r.get("grade") else ""
+                        out.append(f"      - {label}{r['algorithm']}{grade}{detail}{_mark(r)}")
                 rest = [r for r in prs if not r["version"]]
             else:
                 rest = prs
@@ -631,6 +677,26 @@ def main():
                     print(f"[v {i}/{len(todo)}] {s['target']:<25} {v.get('status')} "
                           f"confirmed={v.get('confirmed', '-')}", file=sys.stderr)
 
+    # Kademeli notlandırma: TLS cipher'larına grade ver, zayıf tiyerleri weak=YES yap
+    from collections import Counter
+    for r in all_rows:
+        if r.get("protocol") == "TLS" and r.get("category") == "cipher":
+            g = classify_cipher(r["algorithm"])
+            r["grade"] = g
+            r["weak"] = "YES" if g in GRADE_WEAK else ""
+        else:
+            r.setdefault("grade", "")
+    # weak listelerini ve grade sayılarını satırlardan yeniden hesapla (tutarlılık için)
+    rows_by_t = {}
+    for r in all_rows:
+        rows_by_t.setdefault(r["target"], []).append(r)
+    for s in summaries:
+        rws = rows_by_t.get(s["target"], [])
+        s["weak"] = [f"{r['version'] or r['protocol']}:{r['algorithm']}"
+                     for r in rws if r["weak"] == "YES"]
+        gc = Counter(r["grade"] for r in rws if r.get("grade"))
+        s["grades"] = " ".join(f"{g}={gc[g]}" for g in GRADE_ORDER if gc.get(g))
+
     all_rows.sort(key=lambda r: r["target"])
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
@@ -643,7 +709,7 @@ def main():
                     "cert_key", "cert_sig", "cert_not_after", "cert_expired",
                     "cert_self_signed", "dh_issues", "ssh", "rdp", "sslscan_status",
                     "sslscan_confirmed", "heartbleed", "insecure_reneg", "fallback_scsv",
-                    "kex_groups", "weak_count", "weak_items"])
+                    "kex_groups", "grade_counts", "weak_count", "weak_items"])
         for s in sorted(summaries, key=lambda s: s["target"]):
             c, v = s.get("cert", {}), dict(s.get("sslscan", {}))
             # Python motorunun kendi bulguları; sslscan sonucu varsa o öncelikli
@@ -657,8 +723,8 @@ def main():
                         s.get("ssh", ""), s.get("rdp", ""), v.get("status", ""),
                         v.get("confirmed", ""), v.get("heartbleed", ""),
                         v.get("reneg_insecure", ""), v.get("fallback_scsv", ""),
-                        " ".join(v.get("groups", [])), len(s.get("weak", [])),
-                        " | ".join(s.get("weak", []))])
+                        " ".join(v.get("groups", [])), s.get("grades", ""),
+                        len(s.get("weak", [])), " | ".join(s.get("weak", []))])
 
     # Sade çıktı: target, state, service, tls_version, algorithm (her algoritma bir satır)
     # Sadece gerçek algoritmalar: TLS cipher'ları/kex grupları ve SSH algoritmaları.
