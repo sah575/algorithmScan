@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tlsscan Notlandırma Rehberi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --paper:#f4f6fa; --panel:#ffffff; --ink:#1a2233; --muted:#5b6478; --line:#dde2ea;
+  --accent:#32468c; --accent-soft:#e8ecf8;
+  --g-strong:#16a34a; --g-med:#0ea5e9; --g-med1:#ca8a04; --g-weak:#ea580c;
+  --g-vweak:#ef4444; --g-dep:#991b1b; --g-unc:#8a93a6;
+  --q:#7c3aed; --q-soft:#f1eafd;
+  --good-bg:#eafbf1; --warn-bg:#fff8ea; --bad-bg:#fdeeee;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#11141c; --panel:#171b26; --ink:#e7eaf2; --muted:#9aa3b8; --line:#2a3040;
+    --accent:#7a8fe0; --accent-soft:#1d2440;
+    --g-med1:#eab308; --q-soft:#241a3a;
+    --good-bg:#102419; --warn-bg:#2a2210; --bad-bg:#2a1414;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#11141c; --panel:#171b26; --ink:#e7eaf2; --muted:#9aa3b8; --line:#2a3040;
+  --accent:#7a8fe0; --accent-soft:#1d2440;
+  --g-med1:#eab308; --q-soft:#241a3a;
+  --good-bg:#102419; --warn-bg:#2a2210; --bad-bg:#2a1414;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--paper);color:var(--ink);
+  font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  padding-inline:16px;padding-block:28px}
+.wrap{max-width:760px;margin:0 auto}
+h1,h2,h3{font-family:"IBM Plex Serif",Georgia,serif;text-wrap:balance;line-height:1.25}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,Consolas,monospace}
+header.top{margin-bottom:34px}
+header.top .eyebrow{font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--accent);font-weight:600}
+header.top h1{font-size:30px;margin:6px 0 10px;color:var(--ink)}
+header.top p{color:var(--muted);font-size:15.5px;max-width:58ch;margin:0}
+.toc{display:flex;flex-wrap:wrap;gap:8px 14px;margin:20px 0 0;padding:0;list-style:none;
+  font-size:12.5px}
+.toc a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+.toc a:hover{border-color:var(--accent)}
+section{margin:40px 0}
+section>h2{font-size:21px;margin:0 0 4px;display:flex;align-items:baseline;gap:10px}
+section>h2 .n{color:var(--muted);font-size:14px;font-family:"IBM Plex Mono",monospace;font-weight:500}
+section>.lede{color:var(--muted);font-size:14.5px;margin:4px 0 18px;max-width:62ch}
+h3{font-size:15.5px;margin:22px 0 8px;color:var(--ink)}
+p{line-height:1.65;font-size:14.5px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+table{width:100%;border-collapse:collapse;font-size:13.3px;margin:10px 0}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+tr:last-child td{border-bottom:none}
+.wide{overflow-x:auto}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;color:#fff;white-space:nowrap}
+.b-strong{background:var(--g-strong)} .b-med{background:var(--g-med)}
+.b-med1{background:var(--g-med1)} .b-weak{background:var(--g-weak)}
+.b-vweak{background:var(--g-vweak)} .b-dep{background:var(--g-dep)} .b-unc{background:var(--g-unc)}
+.qbadge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;color:#fff;background:var(--q)}
+.yes{color:var(--g-vweak);font-weight:700}
+.no{color:var(--g-strong);font-weight:700}
+.callout{border:1px solid color-mix(in srgb, var(--q) 45%, var(--line));
+  background:var(--q-soft);border-radius:12px;padding:16px 20px;margin:16px 0}
+.callout .lab{color:var(--q);font-weight:700;font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.anatomy{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-family:"IBM Plex Mono",monospace;
+  font-size:14px;margin:14px 0}
+.anatomy .part{border-radius:8px;padding:6px 10px;border:1px solid var(--line);background:var(--panel)}
+.anatomy .part b{display:block;font-family:"IBM Plex Sans",sans-serif;font-size:10px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:3px}
+.anatomy .part.kex{border-color:#5b7bd1}.anatomy .part.auth{border-color:#4ea1a1}
+.anatomy .part.bulk{border-color:#c98a3a}.anatomy .part.mac{border-color:#b0567d}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+@media (max-width:620px){.grid3{grid-template-columns:1fr}}
+.verdict{border-radius:10px;padding:12px 14px;font-size:13.5px}
+.verdict.good{background:var(--good-bg)}.verdict.warn{background:var(--warn-bg)}.verdict.bad{background:var(--bad-bg)}
+.verdict b{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px}
+.verdict.good b{color:var(--g-strong)}.verdict.warn b{color:var(--g-med1)}.verdict.bad b{color:var(--g-vweak)}
+footer{margin-top:46px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+.gloss dt{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:13px;margin-top:10px}
+.gloss dd{margin:2px 0 0;color:var(--muted);font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="eyebrow">Referans belgesi</div>
+  <h1>tlsscan Notlandırma Rehberi</h1>
+  <p>tlsscan bir hedefi tararken bulduğu her şeye (cipher, sertifika, protokol, anahtar değişimi) bir not veriyor. Bu belge o notların <b>neye göre</b> verildiğini, <b>neyin güçlü/zayıf/kabul edilebilir</b> sayıldığını ve aracın <b>ne ölçmediğini</b> tek yerden anlatır.</p>
+  <ul class="toc">
+    <li><a href="#eksenler">1. İki farklı eksen</a></li>
+    <li><a href="#cipher">2. Cipher notu</a></li>
+    <li><a href="#sertifika">3. Sertifika</a></li>
+    <li><a href="#protokol">4. Protokol sürümü</a></li>
+    <li><a href="#diger">5. DH / SSH / RDP</a></li>
+    <li><a href="#kuantum">6. ⚛ Kuantum riski</a></li>
+    <li><a href="#karar">7. Hızlı karar tablosu</a></li>
+    <li><a href="#sozluk">8. Sözlük</a></li>
+  </ul>
+</header>
+
+<section id="eksenler">
+  <h2><span class="n">01</span> İki farklı eksen var — karıştırmayın</h2>
+  <p class="lede">Kafa karışıklığının çoğu buradan çıkıyor: tool aynı satırda <b>iki bağımsız değerlendirme</b> yapıyor.</p>
+  <div class="grid3" style="grid-template-columns:1fr 1fr">
+    <div class="card">
+      <h3 style="margin-top:0">Eksen A — Cipher notu <span class="badge b-strong" style="margin-left:6px">Güçlü</span></h3>
+      <p style="margin:0">Bugünkü, klasik güvenliği ölçer: şifreleme modu, hash, anahtar uzunluğu. 7 kademeli bir not üretir (Güçlü → Unclassified). <b>Sadece cipher satırlarına</b> uygulanır.</p>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Eksen B — Kuantum riski <span class="qbadge" style="margin-left:6px">⚛</span></h3>
+      <p style="margin:0">Asimetrik/anahtar-değişim bileşenlerini (anahtar değişimi grubu, sertifika açık anahtarı/imzası, DH parametreleri) işaretler. Cipher notundan <b>bağımsızdır</b> — "Güçlü" bir cipher'ın anahtar değişimi hâlâ ⚛ olabilir.</p>
+    </div>
+  </div>
+  <p>Örnek bir cipher adı dört parçaya ayrılır, her parça ayrı bir eksenin girdisidir:</p>
+  <div class="anatomy">
+    <span class="part kex"><b>Anahtar değişimi</b>ECDHE</span><span>–</span>
+    <span class="part auth"><b>Kimlik doğrulama</b>RSA</span><span>–</span>
+    <span class="part bulk"><b>Simetrik şifreleme</b>AES256_GCM</span><span>–</span>
+    <span class="part mac"><b>Bütünlük (MAC)</b>SHA384</span>
+  </div>
+  <p>İlk iki parça (anahtar değişimi + kimlik doğrulama) asimetrik — <b>⚛ eksenine</b> girer. Son iki parça (simetrik şifreleme + hash) — <b>cipher notu eksenine</b> girer. Aynı satırda iki farklı soru sorulur: "bugün kırılabilir mi" ve "kuantumla kırılabilir mi".</p>
+</section>
+
+<section id="cipher">
+  <h2><span class="n">02</span> Cipher notu — <code>grade</code> sütunu</h2>
+  <p class="lede">Dört kritere bakılır: şifreleme modu (AEAD mi CBC mi), hash gücü, anahtar uzunluğu, eski/kırık primitif var mı. <code>tlsscan.py → classify_cipher()</code></p>
+  <div class="wide"><table>
+    <tr><th>Not</th><th>Kriter</th><th>Örnek</th><th>Zayıf mı?</th></tr>
+    <tr><td><span class="badge b-strong">Güçlü</span></td><td>AEAD (GCM/CCM/ChaCha20-Poly1305) + modern bütünlük</td><td><code>ECDHE-RSA-AES256-GCM-SHA384</code></td><td class="no">hayır</td></tr>
+    <tr><td><span class="badge b-med">Orta</span></td><td>CBC modu (AEAD değil) ama hash SHA-2</td><td><code>AES128-SHA256</code></td><td class="no">hayır</td></tr>
+    <tr><td><span class="badge b-med1">Orta (SHA1)</span></td><td>256-bit anahtar, CBC + SHA-1 — uzun anahtar kısmen dengeliyor</td><td><code>AES256-SHA</code></td><td class="no">hayır</td></tr>
+    <tr><td><span class="badge b-weak">Zayıf</span></td><td>128-bit CBC + SHA-1, ama eliptik Forward&nbsp;Secrecy var</td><td><code>ECDHE-RSA-AES128-SHA</code></td><td class="yes">evet</td></tr>
+    <tr><td><span class="badge b-vweak">Çok Zayıf</span></td><td>128-bit CBC + SHA-1, Forward Secrecy yok / export</td><td><code>AES128-SHA</code>, <code>DHE-RSA-AES128-SHA</code></td><td class="yes">evet</td></tr>
+    <tr><td><span class="badge b-dep">Zayıf (Deprecated)</span></td><td>Eski/kırık primitif: RC4, 3DES, DES, MD5, IDEA, SEED, NULL, export</td><td><code>TLS_RSA_WITH_3DES_EDE_CBC_SHA</code>, <code>NULL-SHA</code></td><td class="yes">evet</td></tr>
+    <tr><td><span class="badge b-unc">Unclassified</span></td><td>Kural kapsamı dışı (nadir kombinasyon) — elle kontrol</td><td>bazı CCM varyantları</td><td class="no">hayır</td></tr>
+  </table></div>
+  <p><b>Forward Secrecy (FS) neden önemli:</b> anahtar değişimi ECDHE/DHE ile yapılıyorsa, sunucunun uzun süreli özel anahtarı çalınsa bile <i>geçmişte</i> kayıt edilmiş trafik deşifre edilemez. Düz <code>RSA</code> anahtar değişiminde (FS yok) bu koruma yoktur — bu yüzden aynı 128-bit/SHA-1 kombinasyonu FS varsa "Zayıf", yoksa "Çok Zayıf" sayılır.</p>
+</section>
+
+<section id="sertifika">
+  <h2><span class="n">03</span> Sertifika kontrolleri</h2>
+  <p class="lede">Cipher notundan tamamen ayrı dört kontrol — her biri kendi eşiğiyle <code>weak=YES/NO</code> üretir, kademeli not yoktur.</p>
+  <div class="wide"><table>
+    <tr><th>Kontrol</th><th>Eşik</th><th>Zayıf örneği</th></tr>
+    <tr><td>Açık anahtar uzunluğu</td><td>RSA/DSA/DH ≥ 2048 bit, EC ≥ 256 bit</td><td>"RSA 1024 bit — eşik: ≥2048 bit"</td></tr>
+    <tr><td>İmza algoritması</td><td>SHA-256 ve üzeri</td><td>"sha1WithRSAEncryption — eşik: SHA-256 ve üzeri"</td></tr>
+    <tr><td>Geçerlilik tarihi</td><td>süresi dolmamış</td><td><code>EXPIRED</code></td></tr>
+    <tr><td>Self-signed</td><td>Subject ≠ Issuer olmalı</td><td>Subject == Issuer → <code>self-signed</code></td></tr>
+  </table></div>
+  <p>Self-signed sertifika, bağımsız bir CA (sertifika yetkilisi) tarafından onaylanmadığı için kimlik doğrulaması sağlamaz — RSA 2048 + SHA-256 kullansa bile zayıf sayılır, çünkü ölçülen şey anahtar gücü değil <i>güven zinciri</i>.</p>
+</section>
+
+<section id="protokol">
+  <h2><span class="n">04</span> Protokol sürümü</h2>
+  <div class="grid3">
+    <div class="verdict bad"><b>Acilen kaldır</b>SSLv2, SSLv3, TLS 1.0, TLS 1.1 — POODLE, BEAST; <code>WEAK_TLS_VERSIONS</code> kümesinde</div>
+    <div class="verdict warn"><b>Kabul edilebilir</b>TLS 1.2 — AEAD cipher'larla (GCM/ChaCha) kullanılıyorsa sorun yok</div>
+    <div class="verdict good"><b>Hedef</b>TLS 1.3 — zayıf cipher seçeneği yok, el sıkışması da şifreli</div>
+  </div>
+</section>
+
+<section id="diger">
+  <h2><span class="n">05</span> Diğer protokoller — kısaca</h2>
+  <div class="wide"><table>
+    <tr><th>Protokol</th><th>Zayıf sayılan</th></tr>
+    <tr><td>Diffie-Hellman (DH)</td><td>&lt;2048 bit grup, Logjam (export DH), anonim DH</td></tr>
+    <tr><td>SSH</td><td>CBC modu, arcfour, 3des, blowfish, cast128, hmac-md5, <code>*-96</code> MAC, umac-64, <code>diffie-hellman-group1-*</code>, <code>ssh-dss</code>, <code>none</code></td></tr>
+    <tr><td>RDP</td><td>40/56-bit şifreleme; Native RDP (NLA zorunlu değilse)</td></tr>
+  </table></div>
+</section>
+
+<section id="kuantum">
+  <h2><span class="n">06</span> ⚛ Kuantum riski — ayrı bir eksen</h2>
+  <p class="lede">Kuantum bilgisayarlar iki algoritmayla farklı şeyleri farklı şiddette kırar.</p>
+  <div class="grid3" style="grid-template-columns:1fr 1fr">
+    <div class="card">
+      <h3 style="margin-top:0">Shor algoritması</h3>
+      <p style="margin:0">RSA, DH/ECDH, DSA/ECDSA gibi <b>asimetrik</b> algoritmaları tamamen kırar — güvenlik sıfırlanır. tlsscan'de <code>kex-group</code>, sertifika <code>public-key</code> ve <code>signature</code>, <code>dh-params</code> satırlarına bu yüzden ⚛ rozeti konur.</p>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Grover algoritması</h3>
+      <p style="margin:0">AES, SHA gibi <b>simetrik</b> algoritmalarda gücü yarıya düşürür (AES-128 → efektif AES-64). Çözüm basit: daha uzun anahtar (AES-256, SHA-256+). Bu zaten <b>cipher notu</b> eksenince ölçülüyor.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <div class="lab">Önemli</div>
+    "Güçlü" notu kuantum güvenliği anlamına gelmez. <code>ECDHE-RSA-AES256-GCM-SHA384</code> klasik olarak mükemmeldir, ama anahtar değişimi (ECDHE) ve sertifika imzası (RSA/ECDSA) kuantum bilgisayarla Shor algoritmasıyla kırılabilir. tlsscan bugün PQC/hibrit (örn. ML-KEM, ML-DSA) desteğini <b>ölçmez</b> — sadece mevcut klasik yapılandırmayı tarar.
+  </div>
+</section>
+
+<section id="karar">
+  <h2><span class="n">07</span> Hızlı karar tablosu</h2>
+  <div class="wide"><table>
+    <tr><th>Durum</th><th>Ne anlama geliyor</th></tr>
+    <tr><td><span class="badge b-vweak">Çok Zayıf</span> / <span class="badge b-dep">Deprecated</span> / TLS 1.0-1.1 / self-signed / expired</td><td>Klasik olarak da kırık — önce bunlar temizlenmeli, tartışmasız öncelik</td></tr>
+    <tr><td><span class="badge b-weak">Zayıf</span> / <span class="badge b-med1">Orta (SHA1)</span></td><td>Acil değil ama geçiş planına alınmalı — SHA-1 artık önerilmiyor</td></tr>
+    <tr><td><span class="badge b-med">Orta</span> / <span class="badge b-strong">Güçlü</span>, TLS 1.2+</td><td>Klasik olarak kabul edilebilir/iyi — bugün için güvenli</td></tr>
+    <tr><td><span class="qbadge">⚛</span> rozetli her satır</td><td>Klasik notu ne olursa olsun, kuantum bilgisayar çağında (henüz değil, ama hazırlık şimdiden gerekiyor) hedef alınabilir — PQC/hibrit geçişi bu satırlar için planlanmalı</td></tr>
+  </table></div>
+</section>
+
+<section id="sozluk">
+  <h2><span class="n">08</span> Sözlük — CSV/arayüz alanları</h2>
+  <dl class="gloss">
+    <dt>grade</dt><dd>Cipher'ın kademeli notu (Güçlü…Unclassified) — sadece <code>category=cipher</code> satırlarında.</dd>
+    <dt>grade_reason</dt><dd>Notun kısa gerekçesi, hangi kritere göre verildiğini açıklar.</dd>
+    <dt>weak</dt><dd><code>YES</code>/boş — o satırın zayıf kabul edilip edilmediği (ikili).</dd>
+    <dt>category</dt><dd>Satırın türü: <code>version</code>, <code>cipher</code>, <code>kex-group</code>, <code>public-key</code>, <code>signature</code>, <code>dh-params</code>, vb.</dd>
+    <dt>detail</dt><dd>Ek bilgi: kex grubu, eşik notu, EXPIRED/self-signed işareti.</dd>
+    <dt>verified</dt><dd><code>--verify</code> ile sslscan doğrulaması: CONFIRMED / NOT-CONFIRMED.</dd>
+    <dt>⚛</dt><dd>Asimetrik/anahtar-değişim bileşeni — kuantum riski taşır, cipher notundan ayrı bir rozet.</dd>
+  </dl>
+</section>
+
+<footer>tlsscan / webui — iç kullanım için referans belgesi.</footer>
+
+</div>
+</body>
+</html>

@@ -37,7 +37,13 @@ WEAK_SSH = re.compile(
 )
 
 FIELDS = ["target", "service", "protocol", "version", "category", "algorithm",
-          "detail", "weak", "grade", "verified"]
+          "detail", "weak", "grade", "grade_reason", "verified"]
+
+# Bu kategoriler asimetrik/anahtar-değişim bileşenlerini temsil eder: RSA, (EC)DH,
+# ECDSA/RSA imzaları. Shor algoritmasıyla kuantum bilgisayarda tamamen kırılabilirler;
+# cipher notlandırması (AEAD/CBC/SHA vb.) bunu ölçmez, çünkü o sadece simetrik/hash
+# tarafını (Grover'a karşı anahtar uzunluğu) değerlendirir.
+QUANTUM_RISK_CATEGORIES = {"kex-group", "public-key", "signature", "dh-params"}
 
 # ---------------------------------------------------------------------------
 # Cipher suite kademeli notlandırma (PQC envanter çalışmasının mantığına göre)
@@ -51,17 +57,20 @@ GRADE_ORDER = ["Güçlü", "Orta", "Orta (SHA1)", "Zayıf", "Çok Zayıf",
 
 
 def classify_cipher(name):
-    """Cipher adını (OpenSSL ya da IANA biçimi) kademeli nota çevirir."""
+    """Cipher adını (OpenSSL ya da IANA biçimi) kademeli nota ve notun kısa
+    gerekçesine çevirir. Dönüş: (grade, reason) — reason, notun şifreleme modu,
+    hash ve anahtar uzunluğu eksenlerine göre neden verildiğini açıklayan kısa
+    Türkçe metindir (arayüzde tooltip/rapor satırı olarak gösterilir)."""
     n = (name or "").upper().replace("-", "_")
     if not n or n.startswith("0X"):
-        return ""  # ham id, isim yok
+        return "", ""  # ham id, isim yok
     if "NULL" in n:
-        return "Zayıf (Deprecated)"              # şifrelemesiz
+        return "Zayıf (Deprecated)", "şifreleme yok (NULL cipher) — veri açık metin gidiyor"
     if "EXPORT" in n or n.startswith("EXP"):
-        return "Çok Zayıf"                        # export-grade
+        return "Çok Zayıf", "export-grade cipher — kasıtlı zayıflatılmış (~40-56 bit anahtar)"
     if any(t in n for t in ("RC4", "RC2", "3DES", "DES_EDE", "DES_CBC", "_DES_",
                             "MD5", "IDEA", "SEED")):
-        return "Zayıf (Deprecated)"              # eski/kırık primitifler
+        return "Zayıf (Deprecated)", "eski/kırık primitif (RC4/3DES/DES/MD5/IDEA/SEED) kullanıyor"
     bits = 256 if "256" in n else (192 if "192" in n else (128 if "128" in n else 0))
     if "SHA384" in n or "SHA256" in n or "SHA512" in n:
         sha = 2
@@ -71,16 +80,16 @@ def classify_cipher(name):
         sha = 0
     aead = "GCM" in n or "CCM" in n or "CHACHA20" in n or "POLY1305" in n
     if aead:
-        return "Güçlü"                            # AEAD
+        return "Güçlü", "AEAD şifreleme (GCM/CCM/ChaCha20-Poly1305) + modern (SHA-2) bütünlük"
     if sha == 2:
-        return "Orta"                             # CBC + SHA-2
+        return "Orta", "CBC modu (AEAD değil) ama bütünlük kontrolü SHA-2 — mod eski, hash güncel"
     if sha == 1:
         if bits >= 256:
-            return "Orta (SHA1)"                  # 256-bit CBC + SHA-1
+            return "Orta (SHA1)", f"{bits}-bit anahtar CBC+SHA-1'i kısmen dengeliyor, ama SHA-1 artık önerilmiyor"
         if "ECDHE" in n or "AECDH" in n:
-            return "Zayıf"                        # 128-bit SHA-1 ama eliptik FS
-        return "Çok Zayıf"                        # 128-bit SHA-1, FS yok
-    return "Unclassified"
+            return "Zayıf", f"{bits or '?'}-bit CBC + SHA-1, fakat eliptik anahtar değişimi (Forward Secrecy) var"
+        return "Çok Zayıf", f"{bits or '?'}-bit CBC + SHA-1, Forward Secrecy yok — bir anahtar çalınırsa geçmiş trafik de deşifre edilebilir"
+    return "Unclassified", "kural kapsamı dışı (nadir/bilinmeyen kombinasyon) — elle kontrol edin"
 
 
 def parse_target(line):
@@ -213,6 +222,20 @@ def dn(table):
     return "/".join(f"{e.get('key')}={e.text}" for e in table.findall("elem"))
 
 
+def cert_key_note(ktype, bits):
+    """Sertifika açık anahtarı zayıf bulunduğunda eşik değeri gösteren kısa not."""
+    if ktype == "ec":
+        return f"EC {bits} bit — eşik: ≥256 bit"
+    if ktype:
+        return f"{ktype.upper()} {bits} bit — eşik: ≥2048 bit"
+    return ""
+
+
+def cert_sig_note(sig):
+    """Sertifika imza algoritması zayıf bulunduğunda eşik değeri gösteren kısa not."""
+    return f"{sig} — eşik: SHA-256 ve üzeri (MD5/SHA-1 çakışma saldırılarına açık)"
+
+
 def parse_cert(script, add, summary):
     subj, issuer = script.find("table[@key='subject']"), script.find("table[@key='issuer']")
     cn = subj.findtext("elem[@key='commonName']", "") if subj is not None else ""
@@ -245,8 +268,9 @@ def parse_cert(script, add, summary):
     add("CERT", "", "issuer", dn(issuer), "self-signed" if self_signed else "", self_signed)
     if san:
         add("CERT", "", "san", san)
-    add("CERT", "", "public-key", f"{ktype} {bits}".strip(), curve, key_weak)
-    add("CERT", "", "signature", sig, "", sig_weak)
+    pk_detail = " ".join(x for x in (curve, cert_key_note(ktype, bits) if key_weak else "") if x)
+    add("CERT", "", "public-key", f"{ktype} {bits}".strip(), pk_detail, key_weak)
+    add("CERT", "", "signature", sig, cert_sig_note(sig) if sig_weak else "", sig_weak)
     add("CERT", "", "validity", f"{nb} -> {na}", "EXPIRED" if expired else "", expired)
     summary["cert"] = {"cn": cn, "issuer": dn(issuer), "key": f"{ktype} {bits}".strip(),
                        "sig": sig, "not_after": na, "expired": expired,
@@ -477,6 +501,8 @@ PROTOCOL_LABELS = {"TLS": "TLS/SSL", "CERT": "Sertifika", "DH": "Diffie-Hellman"
 
 def _mark(r):
     m = " [ZAYIF]" if r["weak"] else ""
+    if r.get("category") in QUANTUM_RISK_CATEGORIES:
+        m += " [⚛ kuantum riski: Shor algoritmasıyla kırılabilir]"
     if r.get("verified") in ("CONFIRMED", "NOT-CONFIRMED"):
         m += f" [{r['verified']}]"
     return m
@@ -522,7 +548,8 @@ def build_report(summaries, rows):
                             CATEGORY_LABELS.get(r["category"], r["category"]) + ": "
                         detail = f"  ({r['detail']})" if r["detail"] else ""
                         grade = f"  [{r['grade']}]" if r.get("grade") else ""
-                        out.append(f"      - {label}{r['algorithm']}{grade}{detail}{_mark(r)}")
+                        reason = f" — {r['grade_reason']}" if r.get("grade_reason") else ""
+                        out.append(f"      - {label}{r['algorithm']}{grade}{reason}{detail}{_mark(r)}")
                 rest = [r for r in prs if not r["version"]]
             else:
                 rest = prs
@@ -594,11 +621,13 @@ def finalize_grades(all_rows, summaries):
     from collections import Counter
     for r in all_rows:
         if r.get("protocol") == "TLS" and r.get("category") == "cipher":
-            g = classify_cipher(r["algorithm"])
+            g, reason = classify_cipher(r["algorithm"])
             r["grade"] = g
+            r["grade_reason"] = reason
             r["weak"] = "YES" if g in GRADE_WEAK else ""
         else:
             r.setdefault("grade", "")
+            r.setdefault("grade_reason", "")
     rows_by_t = {}
     for r in all_rows:
         rows_by_t.setdefault(r["target"], []).append(r)

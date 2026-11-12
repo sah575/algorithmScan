@@ -52,11 +52,16 @@ tbody tr.sum:hover{background:var(--bg)}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
 .chip{border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:12px;cursor:pointer;user-select:none;background:var(--bg)}
 .chip.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
-.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;color:#fff;white-space:nowrap}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;color:#fff;white-space:nowrap;cursor:help}
 .g-Güçlü{background:var(--g-strong)} .g-Orta{background:var(--g-med)}
 .g-OrtaSHA1{background:var(--g-med1);color:#3a2f00}
 .g-Zayıf{background:var(--g-weak)} .g-ÇokZayıf{background:var(--g-vweak)}
 .g-Deprecated{background:var(--g-dep)} .g-Unclassified{background:var(--g-unc)}
+.qbadge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;
+  color:#fff;background:#7c3aed;white-space:nowrap;cursor:help}
+.gdesc{color:var(--muted);font-size:11px}
+.qnote{background:color-mix(in srgb,#7c3aed 10%,var(--panel));border:1px solid #7c3aed55;
+  border-radius:8px;padding:8px 12px;font-size:12px;margin-top:10px;line-height:1.5}
 .detail{background:var(--bg)}
 .detail td{padding:0}
 .detwrap{padding:12px 16px}
@@ -72,9 +77,10 @@ tbody tr.sum:hover{background:var(--bg)}
 .hidden{display:none}
 .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .toolbar input[type=text]{max-width:260px}
-.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;margin-top:10px}
-.legend span{display:flex;align-items:center;gap:5px}
-.sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-top:10px;align-items:flex-start}
+.legend .gitem{display:flex;flex-direction:column;gap:2px;max-width:230px}
+.legend .ghead{display:flex;align-items:center;gap:5px}
+.sw{width:11px;height:11px;border-radius:3px;display:inline-block;flex:none}
 .err{color:var(--g-vweak);font-weight:600}
 button.danger{background:var(--g-vweak)}
 #drop{position:relative}
@@ -137,6 +143,7 @@ button.danger{background:var(--g-vweak)}
     <h2>Sonuçlar</h2>
     <div id="agg"></div>
     <div class="legend" id="legend"></div>
+    <div class="qnote">⚛ <b>Kuantum notu:</b> Buradaki renkli notlar (Güçlü/Orta/Zayıf…) <i>klasik</i> (bugünkü) güvenliği ölçer: şifreleme modu, hash ve anahtar uzunluğu. <span class="qbadge" style="margin:0 2px">⚛</span> rozetli satırlar (anahtar değişimi, sertifika açık anahtarı/imzası) ise asimetrik algoritmalardır (RSA/DH/ECDH/ECDSA) — bunlar "Güçlü" görünse de bir kuantum bilgisayarla <b>Shor algoritmasıyla tamamen kırılabilir</b>. Bu araç PQC/hibrit (örn. ML-KEM) desteğini ölçmez, sadece klasik yapılandırmayı tarar.</div>
     <div class="toolbar" style="margin-top:14px">
       <input type="text" id="search" placeholder="hedef / servis / algoritma ara…">
       <label class="chk"><input type="checkbox" id="onlyweak"> sadece zayıf</label>
@@ -170,7 +177,18 @@ const GCLASS={"Güçlü":"g-Güçlü","Orta":"g-Orta","Orta (SHA1)":"g-OrtaSHA1"
   "Çok Zayıf":"g-ÇokZayıf","Zayıf (Deprecated)":"g-Deprecated","Unclassified":"g-Unclassified"};
 const GVAR={"Güçlü":"--g-strong","Orta":"--g-med","Orta (SHA1)":"--g-med1","Zayıf":"--g-weak",
   "Çok Zayıf":"--g-vweak","Zayıf (Deprecated)":"--g-dep","Unclassified":"--g-unc"};
+// README'deki tabloyla aynı kısa gerekçeler — legend'de notun altında gösterilir.
+const GDESC={"Güçlü":"AEAD (GCM/CCM/ChaCha20-Poly1305) + SHA-2",
+  "Orta":"CBC modu ama SHA-2 hash","Orta (SHA1)":"256-bit CBC + SHA-1",
+  "Zayıf":"128-bit CBC + SHA-1, ama eliptik Forward Secrecy var",
+  "Çok Zayıf":"128-bit CBC + SHA-1, Forward Secrecy yok / export",
+  "Zayıf (Deprecated)":"Eski/kırık primitif: 3DES, RC4, NULL, SEED, DES, MD5",
+  "Unclassified":"Kural kapsamı dışı (nadir)"};
 const PROTO={TLS:"TLS/SSL",CERT:"Sertifika",DH:"Diffie-Hellman",SSH:"SSH",RDP:"RDP",SSLSCAN:"sslscan ek"};
+// Asimetrik/anahtar-değişim kategorileri: Shor algoritmasıyla kuantumda kırılabilir,
+// cipher notlandırması (yukarıdaki GDESC) bunu kapsamaz — tlsscan.py'deki
+// QUANTUM_RISK_CATEGORIES ile aynı liste.
+const QRISK=new Set(["kex-group","public-key","signature","dh-params"]);
 const CAT={version:"Sürüm",cipher:"Cipher",compression:"Sıkıştırma",warning:"Uyarı",
   "least-strength":"En düşük not",renegotiation:"Renegotiation","fallback-scsv":"Fallback SCSV",
   "kex-group":"Kex grubu",subject:"Subject",issuer:"Issuer",san:"SAN","public-key":"Açık anahtar",
@@ -254,7 +272,9 @@ function renderAgg(){
   $("#agg").innerHTML=`<div class="muted" style="margin-bottom:6px">${nTargets} hedef · ${nWeak} tanesinde zayıf bulgu · ${any} cipher notlandı</div>`+(any?bars:"");
 }
 function renderLegend(){
-  $("#legend").innerHTML=GRADES.map(g=>`<span><i class="sw" style="background:${cvar(g)}"></i>${g}</span>`).join("");
+  $("#legend").innerHTML=GRADES.map(g=>
+    `<div class="gitem"><div class="ghead"><i class="sw" style="background:${cvar(g)}"></i><b>${g}</b></div>`+
+    `<span class="gdesc">${esc(GDESC[g]||"")}</span></div>`).join("");
 }
 function renderChips(){
   $("#gradechips").innerHTML=`<span class="chip ${activeGrade===null?'active':''}" data-g="">Tümü</span>`+
@@ -324,12 +344,13 @@ function detailHTML(s){
   return h;
 }
 function algLine(r,showCat){
-  const g=r.grade?`<span class="badge ${GCLASS[r.grade]||'g-Unclassified'}">${esc(r.grade)}</span>`:"";
+  const g=r.grade?`<span class="badge ${GCLASS[r.grade]||'g-Unclassified'}" title="${esc(r.grade_reason||'')}">${esc(r.grade)}</span>`:"";
+  const q=QRISK.has(r.category)?`<span class="qbadge" title="Asimetrik/anahtar değişim bileşeni — Shor algoritmasıyla kuantum bilgisayarda kırılabilir, bu notlandırma bunu ölçmez">⚛</span>`:"";
   const cat=showCat&&r.category&&r.category!=="cipher"?`<span class="muted">${CAT[r.category]||r.category}:</span> `:"";
   const d=r.detail?`<span class="d">${esc(r.detail)}</span>`:"";
   const w=r.weak==="YES"?`<span class="weakflag">⚠</span>`:"";
   const vf=r.verified&&r.verified!=="sslscan"?`<span class="muted">[${esc(r.verified)}]</span>`:"";
-  return `<div class="alg">${cat}<code>${esc(r.algorithm)}</code>${g}${d}${w}${vf}</div>`;
+  return `<div class="alg">${cat}<code>${esc(r.algorithm)}</code>${g}${q}${d}${w}${vf}</div>`;
 }
 
 $("#search").oninput=render;$("#onlyweak").onchange=render;
@@ -364,7 +385,10 @@ $("#btnPdf").onclick=()=>{
   const w=window.open("","_blank");if(!w){alert("Pop-up engellendi; izin verin.");return;}
   const now=new Date().toLocaleString("tr-TR");
   const gcell=g=>`<span style="display:inline-block;padding:1px 7px;border-radius:9px;color:#fff;font-size:11px;background:${cvar(g)}">${g}</span>`;
-  let body=`<h1>tlsscan raporu</h1><div class="meta">Oluşturma: ${now} · ${DATA.summaries.length} hedef</div>`;
+  let body=`<h1>tlsscan raporu</h1><div class="meta">Oluşturma: ${now} · ${DATA.summaries.length} hedef</div>`+
+    `<div class="meta" style="border:1px solid #7c3aed55;border-radius:6px;padding:6px 10px;margin:6px 0 14px">`+
+    `⚛ <b>Kuantum notu:</b> Renkli notlar (Güçlü/Orta/Zayıf…) klasik güvenliği ölçer. ⚛ rozetli satırlar `+
+    `(anahtar değişimi, sertifika açık anahtarı/imzası) asimetrik olduğu için Shor algoritmasıyla kuantumda kırılabilir — bu araç PQC/hibrit desteğini ölçmez.</div>`;
   DATA.summaries.forEach(s=>{
     const bad=s.state!=="open"&&!String(s.state).startsWith("open");
     body+=`<div class="tgt"><h2>${esc(s.target)}</h2>`+
@@ -391,10 +415,12 @@ $("#btnPdf").onclick=()=>{
   });
   function repLine(r,showCat){
     const g=r.grade?" "+gcell(r.grade):"";
+    const reason=r.grade_reason?` <span class="d">— ${esc(r.grade_reason)}</span>`:"";
+    const q=QRISK.has(r.category)?' <span style="display:inline-block;padding:1px 7px;border-radius:9px;color:#fff;font-size:11px;background:#7c3aed">⚛</span>':"";
     const cat=showCat&&r.category&&r.category!=="cipher"?`<b>${CAT[r.category]||r.category}:</b> `:"";
     const w=r.weak==="YES"?' <span style="color:#b91c1c;font-weight:700">⚠</span>':"";
     const d=r.detail?` <span class="d">(${esc(r.detail)})</span>`:"";
-    return `<li>${cat}<code>${esc(r.algorithm)}</code>${g}${d}${w}</li>`;
+    return `<li>${cat}<code>${esc(r.algorithm)}</code>${g}${q}${reason}${d}${w}</li>`;
   }
   w.document.write(`<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>tlsscan raporu</title>
   <style>body{font:13px/1.5 system-ui,sans-serif;color:#111;max-width:900px;margin:24px auto;padding:0 16px}

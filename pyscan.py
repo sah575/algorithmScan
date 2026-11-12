@@ -28,6 +28,21 @@ from datetime import datetime, timezone
 VERSIONS = {"SSLv3": 0x0300, "TLSv1.0": 0x0301, "TLSv1.1": 0x0302, "TLSv1.2": 0x0303}
 WEAK_VERSIONS = {"SSLv2", "SSLv3", "TLSv1.0", "TLSv1.1"}
 
+
+def _cert_key_note(ktype, bits):
+    """Sertifika açık anahtarı zayıf bulunduğunda eşik değerini gösteren kısa not
+    (tlsscan.py'deki cert_key_note ile aynı mantık, nmap motoruyla tutarlı olsun diye)."""
+    if ktype == "ec":
+        return f"EC {bits} bit — eşik: ≥256 bit"
+    if ktype:
+        return f"{ktype.upper()} {bits} bit — eşik: ≥2048 bit"
+    return ""
+
+
+def _cert_sig_note(sig):
+    """Sertifika imza algoritması zayıf bulunduğunda eşik değerini gösteren kısa not."""
+    return f"{sig} — eşik: SHA-256 ve üzeri (MD5/SHA-1 çakışma saldırılarına açık)"
+
 # Modern OpenSSL'de bulunmayabilecek eski cipher'lar (OpenSSL isimleriyle)
 LEGACY_CIPHERS = {
     0x0001: "NULL-MD5", 0x0002: "NULL-SHA", 0x0003: "EXP-RC4-MD5", 0x0004: "RC4-MD5",
@@ -929,8 +944,9 @@ def scan_target(host, port, timeout=5):
                 "self-signed" if c["self_signed"] else "", c["self_signed"])
             if c["san"]:
                 add("CERT", "", "san", c["san"])
-            add("CERT", "", "public-key", key, c["curve"], key_weak)
-            add("CERT", "", "signature", c["sig"], "", sig_weak)
+            pk_detail = " ".join(x for x in (c["curve"], _cert_key_note(c["key_type"], c["key_bits"]) if key_weak else "") if x)
+            add("CERT", "", "public-key", key, pk_detail, key_weak)
+            add("CERT", "", "signature", c["sig"], _cert_sig_note(c["sig"]) if sig_weak else "", sig_weak)
             add("CERT", "", "validity", f"{c['not_before']} -> {c['not_after']}",
                 "EXPIRED" if expired else "", expired)
             summary["cert"] = {"cn": cn, "issuer": _dn(c["issuer"]), "key": key,
