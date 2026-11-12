@@ -13,6 +13,7 @@ targets.txt formatı (her satır bir hedef, # ile yorum):
 """
 import argparse
 import csv
+import io
 import ipaddress
 import json
 import re
@@ -21,6 +22,7 @@ import subprocess
 import tempfile
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -563,6 +565,215 @@ def build_report(summaries, rows):
     return "\n".join(out)
 
 
+# --------------------------------------------------------------------------
+# Excel (.xlsx) çıktısı — sadece stdlib (zipfile); openpyxl vb. bir pakete
+# gerek yok, OOXML'i elle üretir. Renkler webui.html'deki grade/⚛ renkleriyle
+# aynı anlama gelir: not sütunu klasik güvenliği, ⚛ rengi kuantum riskini
+# (anahtar değişimi/sertifika/imza) gösterir.
+# --------------------------------------------------------------------------
+XLSX_STYLES = {g: i + 3 for i, g in enumerate(GRADE_ORDER)}
+XLSX_STYLES["header"] = 1
+XLSX_STYLES["default"] = 2
+XLSX_STYLES["quantum"] = 10
+XLSX_STYLES["weak"] = XLSX_STYLES["Çok Zayıf"]  # grade'siz genel zayıf bulgular (TLS sürümü, SSH, RDP…)
+
+_XLSX_CONTENT_TYPES = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+    '</Types>'
+)
+_XLSX_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+    '</Relationships>'
+)
+_XLSX_WORKBOOK_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
+    '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    '</Relationships>'
+)
+_XLSX_WORKBOOK = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    '<sheets>'
+    '<sheet name="Detay" sheetId="1" r:id="rId1"/>'
+    '<sheet name="Özet" sheetId="2" r:id="rId2"/>'
+    '</sheets></workbook>'
+)
+# fillId sırası: 0 none, 1 gray125 (OOXML'in ayırdığı sabit ilk iki slot), sonra
+# 2 başlık (lacivert), 3-9 GRADE_ORDER renkleri, 10 kuantum (mor).
+_XLSX_STYLES_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    '<fonts count="2">'
+    '<font><sz val="10"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+    '</fonts>'
+    '<fills count="11">'
+    '<fill><patternFill patternType="none"/></fill>'
+    '<fill><patternFill patternType="gray125"/></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF32468C"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFD6F2DE"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFD6ECFB"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFFCF0C7"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFFCE0C9"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFFBD5D5"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF991B1B"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFE5E7EB"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFEDE4FB"/><bgColor indexed="64"/></patternFill></fill>'
+    '</fills>'
+    '<borders count="2">'
+    '<border><left/><right/><top/><bottom/><diagonal/></border>'
+    '<border>'
+    '<left style="thin"><color rgb="FFDDE2EA"/></left>'
+    '<right style="thin"><color rgb="FFDDE2EA"/></right>'
+    '<top style="thin"><color rgb="FFDDE2EA"/></top>'
+    '<bottom style="thin"><color rgb="FFDDE2EA"/></bottom>'
+    '<diagonal/></border>'
+    '</borders>'
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+    '<cellXfs count="11">'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="5" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="6" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="7" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="1" fillId="8" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="9" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="0" fillId="10" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+    '</cellXfs>'
+    '</styleSheet>'
+)
+
+
+def _xlsx_col_letter(n):
+    s = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        s = chr(65 + rem) + s
+    return s
+
+
+def _xlsx_escape(s):
+    s = "" if s is None else str(s)
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;"))
+
+
+def _xlsx_sheet_xml(data_rows, col_widths):
+    """data_rows: ilk satırı başlık olan [[(değer, stil_no), ...], ...] listesi.
+    Başlık satırı üstte dondurulur (freeze pane), sütun genişlikleri sabittir."""
+    cols_xml = "".join(
+        f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"/>'
+        for i, w in enumerate(col_widths)
+    )
+    rows_xml = []
+    for ri, row in enumerate(data_rows, start=1):
+        cells = []
+        for ci, (val, style) in enumerate(row, start=1):
+            ref = f"{_xlsx_col_letter(ci)}{ri}"
+            cells.append(
+                f'<c r="{ref}" s="{style}" t="inlineStr">'
+                f'<is><t xml:space="preserve">{_xlsx_escape(val)}</t></is></c>'
+            )
+        rows_xml.append(f'<row r="{ri}">{"".join(cells)}</row>')
+    n_cols, n_rows = len(col_widths), max(len(data_rows), 1)
+    dim_ref = f"A1:{_xlsx_col_letter(n_cols)}{n_rows}"
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<dimension ref="{dim_ref}"/>'
+        '<sheetViews><sheetView workbookViewId="0">'
+        '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+        '</sheetView></sheetViews>'
+        f'<cols>{cols_xml}</cols>'
+        f'<sheetData>{"".join(rows_xml)}</sheetData>'
+        '</worksheet>'
+    )
+
+
+def _xlsx_row_style(category, grade, weak):
+    if grade:
+        return XLSX_STYLES.get(grade, XLSX_STYLES["default"])
+    if category in QUANTUM_RISK_CATEGORIES:
+        return XLSX_STYLES["quantum"]
+    if weak == "YES":
+        return XLSX_STYLES["weak"]
+    return XLSX_STYLES["default"]
+
+
+def xlsx_bytes(summaries, rows):
+    """summaries + rows'tan, grade/⚛ rengine göre renklendirilmiş bir .xlsx üretir.
+    Hiçbir dış pakete (openpyxl vb.) gerek yok — OOXML zipfile ile elle yazılır."""
+    det_header = ["Hedef", "Servis", "Protokol", "Sürüm", "Kategori", "Algoritma",
+                  "Detay", "Zayıf", "Not", "Gerekçe", "Doğrulama"]
+    det_widths = [24, 20, 10, 10, 16, 36, 46, 8, 16, 60, 14]
+    det_rows = [[(h, XLSX_STYLES["header"]) for h in det_header]]
+    for r in sorted(rows, key=lambda r: r["target"]):
+        st = _xlsx_row_style(r.get("category"), r.get("grade"), r.get("weak"))
+        det_rows.append([
+            (r.get("target", ""), st), (r.get("service", ""), st),
+            (r.get("protocol", ""), st), (r.get("version", ""), st),
+            (CATEGORY_LABELS.get(r.get("category", ""), r.get("category", "")), st),
+            (r.get("algorithm", ""), st), (r.get("detail", ""), st),
+            (r.get("weak", ""), st), (r.get("grade", ""), st),
+            (r.get("grade_reason", ""), st), (r.get("verified", ""), st),
+        ])
+
+    sum_header = ["Hedef", "Durum", "Servis", "TLS Sürümleri", "Sertifika CN",
+                  "Sertifika Issuer", "Sertifika Anahtarı", "Sertifika İmzası",
+                  "Geçerlilik Sonu", "Süresi Dolmuş", "Self-Signed", "DH Sorunları",
+                  "SSH", "RDP", "Not Dağılımı", "Zayıf Sayısı", "Zayıf Bulgular"]
+    sum_widths = [24, 10, 16, 22, 26, 30, 18, 22, 20, 12, 12, 24, 8, 8, 30, 10, 60]
+    sum_rows = [[(h, XLSX_STYLES["header"]) for h in sum_header]]
+    base = XLSX_STYLES["default"]
+    for s in sorted(summaries, key=lambda s: s["target"]):
+        c = s.get("cert", {})
+        weak_n = len(s.get("weak", []))
+        weak_st = XLSX_STYLES["weak"] if weak_n else XLSX_STYLES["Güçlü"]
+        expired_st = XLSX_STYLES["weak"] if c.get("expired") else base
+        selfsigned_st = XLSX_STYLES["weak"] if c.get("self_signed") else base
+        dh_st = XLSX_STYLES["weak"] if s.get("dh") else base
+        sum_rows.append([
+            (s.get("target", ""), base), (s.get("state", ""), base),
+            (s.get("service", ""), base), (" ".join(s.get("tls_versions", [])), base),
+            (c.get("cn", ""), base), (c.get("issuer", ""), base),
+            (c.get("key", ""), base), (c.get("sig", ""), base),
+            (c.get("not_after", ""), base),
+            ("EVET" if c.get("expired") else "", expired_st),
+            ("EVET" if c.get("self_signed") else "", selfsigned_st),
+            (" | ".join(s.get("dh", [])), dh_st),
+            ("var" if s.get("ssh") else "", base), ("var" if s.get("rdp") else "", base),
+            (s.get("grades", ""), base),
+            (str(weak_n), weak_st), (" | ".join(s.get("weak", [])), base),
+        ])
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _XLSX_CONTENT_TYPES)
+        z.writestr("_rels/.rels", _XLSX_RELS)
+        z.writestr("xl/_rels/workbook.xml.rels", _XLSX_WORKBOOK_RELS)
+        z.writestr("xl/workbook.xml", _XLSX_WORKBOOK)
+        z.writestr("xl/styles.xml", _XLSX_STYLES_XML)
+        z.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml(det_rows, det_widths))
+        z.writestr("xl/worksheets/sheet2.xml", _xlsx_sheet_xml(sum_rows, sum_widths))
+    return buf.getvalue()
+
+
 def run_scans(targets, threads, timeout, engine, conn_timeout, label="", jitter=0.0,
               progress=None, stop_event=None):
     """targets listesini paralel tarar; (rows, summaries) döner.
@@ -660,6 +871,10 @@ def main():
     ap.add_argument("-o", "--output", default="tls_results.csv", help="detay CSV")
     ap.add_argument("-s", "--summary", default="tls_summary.csv", help="hedef başına özet CSV")
     ap.add_argument("-j", "--json", help="ham sonuçları JSON olarak da yaz")
+    ap.add_argument("-x", "--xlsx", nargs="?", const="tls_results.xlsx", default=None,
+                    metavar="DOSYA",
+                    help="renkli, biçimlendirilmiş Excel (.xlsx) çıktısı da yaz "
+                         "(değer verilmezse tls_results.xlsx)")
     ap.add_argument("-r", "--report", default="tls_report.txt",
                     help="okunabilir metin raporu (sürüm + algoritmalar)")
     ap.add_argument("-q", "--quiet", action="store_true",
@@ -799,6 +1014,10 @@ def main():
             json.dump({"summary": summaries, "rows": all_rows}, f, indent=2,
                       ensure_ascii=False)
 
+    if args.xlsx:
+        with open(args.xlsx, "wb") as f:
+            f.write(xlsx_bytes(summaries, all_rows))
+
     report = build_report(summaries, all_rows)
     with open(args.report, "w", encoding="utf-8-sig") as f:
         f.write(report + "\n")
@@ -806,7 +1025,8 @@ def main():
         print(report)
 
     print(f"[+] Sade: {args.extra}  Rapor: {args.report}  Detay: {args.output}  "
-          f"Özet: {args.summary}", file=sys.stderr)
+          f"Özet: {args.summary}" + (f"  Excel: {args.xlsx}" if args.xlsx else ""),
+          file=sys.stderr)
 
 
 if __name__ == "__main__":

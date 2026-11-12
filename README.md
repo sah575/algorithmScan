@@ -146,6 +146,7 @@ python3 tlsscan.py -i targets.txt -t 8 --verify -j sonuc.json
 | `-r, --report` | `tls_report.txt` | Okunabilir metin raporu: hedef başına sürümler ve algoritmalar |
 | `-q, --quiet` | kapalı | Raporu ekrana yazdırma, sadece dosyaya yaz (uzun listeler için) |
 | `-j, --json` | – | Tüm sonuçları JSON olarak da yaz |
+| `-x, --xlsx` | – | Renkli, biçimlendirilmiş Excel (.xlsx) çıktısı da yaz (değer verilmezse `tls_results.xlsx`) |
 | `-t, --threads` | `8` | Aynı anda çalışacak nmap sayısı |
 | `--engine` | `auto` | `auto` (nmap varsa nmap), `nmap` ya da `python` |
 | `--timeout` | `120` | nmap motoru: hedef başına NSE script timeout'u (saniye) |
@@ -227,7 +228,9 @@ SSH hedeflerinde `tls_version` sütunu `SSH-2` olur. (Zayıf/güvenli ayrımı v
 
 ### `tls_results.csv`: detay
 
-Sütunlar: `target, service, protocol, version, category, algorithm, detail, weak, grade, verified`
+Sütunlar: `target, service, protocol, version, category, algorithm, detail, weak, grade, grade_reason, verified`
+
+`grade_reason`, cipher'ın notunu neye göre aldığını açıklayan kısa bir metindir (örn. "128-bit CBC + SHA-1, Forward Secrecy yok…"); sadece `category=cipher` satırlarında doludur. `kex-group`, `public-key`, `signature` ve `dh-params` kategorileri — asimetrik/anahtar-değişim bileşenleri — Shor algoritmasıyla kuantumda kırılabilir oldukları için raporda ve web arayüzünde ayrıca bir ⚛ işaretiyle gösterilir (cipher notundan bağımsız, ayrı bir eksen).
 
 | protocol | category değerleri |
 |---|---|
@@ -253,6 +256,18 @@ Her hedef için tek satır: `target, state, service, tls_versions, cert_cn, cert
 `insecure_reneg`, `fallback_scsv` ve `kex_groups` Python motorunda kendi testlerinden, nmap motorunda ise `--verify` ile sslscan'den doldurulur. `heartbleed` sadece sslscan ile doldurulur.
 
 `state` değerleri: `open`, `closed`, `filtered`, `timeout`, `nmap-error`, `no-result`.
+
+### `tls_results.xlsx`: renkli Excel (`-x/--xlsx`)
+
+CSV'lerin yanına, isteğe bağlı olarak biçimlendirilmiş bir `.xlsx` da yazılır (openpyxl gibi bir pakete gerek yok, sadece stdlib). İki sayfa içerir:
+
+- **Detay** — `tls_results.csv` ile aynı veriyi, her satır **not rengine** (Güçlü yeşil, Orta mavi, Orta (SHA1) sarı, Zayıf turuncu, Çok Zayıf kırmızı, Deprecated koyu kırmızı/beyaz yazı, Unclassified gri) ya da **⚛ kuantum riski** kategorisindeyse mora boyanmış olarak gösterir. Başlık satırı dondurulmuştur (freeze pane), sütunlar sabit genişliktedir.
+- **Özet** — `tls_summary.csv` ile aynı veriyi; süresi dolmuş/self-signed sertifika, DH sorunu ve `weak_count > 0` olan hücreler kırmızı vurgulanır.
+
+```bash
+python tlsscan.py -i targets.txt -x                 # tls_results.xlsx
+python tlsscan.py -i targets.txt -x rapor.xlsx       # özel isim
+```
 
 ## Dikkat edilmesi gerekenler
 
