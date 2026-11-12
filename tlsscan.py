@@ -585,6 +585,7 @@ _XLSX_CONTENT_TYPES = (
     '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
     '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
     '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    '<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
     '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
     '</Types>'
 )
@@ -599,7 +600,8 @@ _XLSX_WORKBOOK_RELS = (
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
     '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
-    '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>'
+    '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
     '</Relationships>'
 )
 _XLSX_WORKBOOK = (
@@ -607,8 +609,9 @@ _XLSX_WORKBOOK = (
     '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
     'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
     '<sheets>'
-    '<sheet name="Detay" sheetId="1" r:id="rId1"/>'
-    '<sheet name="Özet" sheetId="2" r:id="rId2"/>'
+    '<sheet name="Cipher\'lar" sheetId="1" r:id="rId1"/>'
+    '<sheet name="Diğer Bulgular" sheetId="2" r:id="rId2"/>'
+    '<sheet name="Özet" sheetId="3" r:id="rId3"/>'
     '</sheets></workbook>'
 )
 # fillId sırası: 0 none, 1 gray125 (OOXML'in ayırdığı sabit ilk iki slot), sonra
@@ -718,21 +721,38 @@ def _xlsx_row_style(category, grade, weak):
 
 def xlsx_bytes(summaries, rows):
     """summaries + rows'tan, grade/⚛ rengine göre renklendirilmiş bir .xlsx üretir.
-    Hiçbir dış pakete (openpyxl vb.) gerek yok — OOXML zipfile ile elle yazılır."""
-    det_header = ["Hedef", "Servis", "Protokol", "Sürüm", "Kategori", "Algoritma",
-                  "Detay", "Zayıf", "Not", "Gerekçe", "Doğrulama"]
-    det_widths = [24, 20, 10, 10, 16, 36, 46, 8, 16, 60, 14]
-    det_rows = [[(h, XLSX_STYLES["header"]) for h in det_header]]
+    Hiçbir dış pakete (openpyxl vb.) gerek yok — OOXML zipfile ile elle yazılır.
+    Üç sayfa: Cipher'lar (sadece TLS — kendi notuyla/gerekçesiyle), Diğer Bulgular
+    (CERT/DH/SSH/RDP — not/gerekçe sütunu yok, hep boş olacaktı), Özet."""
+    cipher_header = ["Hedef", "Servis", "Sürüm", "Kategori", "Algoritma",
+                     "Detay", "Zayıf", "Not", "Gerekçe", "Doğrulama"]
+    cipher_widths = [24, 20, 10, 14, 36, 46, 8, 16, 60, 14]
+    cipher_rows = [[(h, XLSX_STYLES["header"]) for h in cipher_header]]
+
+    other_header = ["Hedef", "Servis", "Protokol", "Sürüm", "Kategori", "Algoritma",
+                    "Detay", "Zayıf", "Doğrulama"]
+    other_widths = [24, 20, 10, 10, 16, 36, 46, 8, 14]
+    other_rows = [[(h, XLSX_STYLES["header"]) for h in other_header]]
+
     for r in sorted(rows, key=lambda r: r["target"]):
         st = _xlsx_row_style(r.get("category"), r.get("grade"), r.get("weak"))
-        det_rows.append([
-            (r.get("target", ""), st), (r.get("service", ""), st),
-            (r.get("protocol", ""), st), (r.get("version", ""), st),
-            (CATEGORY_LABELS.get(r.get("category", ""), r.get("category", "")), st),
-            (r.get("algorithm", ""), st), (r.get("detail", ""), st),
-            (r.get("weak", ""), st), (r.get("grade", ""), st),
-            (r.get("grade_reason", ""), st), (r.get("verified", ""), st),
-        ])
+        if r.get("protocol") == "TLS":
+            cipher_rows.append([
+                (r.get("target", ""), st), (r.get("service", ""), st),
+                (r.get("version", ""), st),
+                (CATEGORY_LABELS.get(r.get("category", ""), r.get("category", "")), st),
+                (r.get("algorithm", ""), st), (r.get("detail", ""), st),
+                (r.get("weak", ""), st), (r.get("grade", ""), st),
+                (r.get("grade_reason", ""), st), (r.get("verified", ""), st),
+            ])
+        else:
+            other_rows.append([
+                (r.get("target", ""), st), (r.get("service", ""), st),
+                (r.get("protocol", ""), st), (r.get("version", ""), st),
+                (CATEGORY_LABELS.get(r.get("category", ""), r.get("category", "")), st),
+                (r.get("algorithm", ""), st), (r.get("detail", ""), st),
+                (r.get("weak", ""), st), (r.get("verified", ""), st),
+            ])
 
     sum_header = ["Hedef", "Durum", "Servis", "TLS Sürümleri", "Sertifika CN",
                   "Sertifika Issuer", "Sertifika Anahtarı", "Sertifika İmzası",
@@ -769,8 +789,9 @@ def xlsx_bytes(summaries, rows):
         z.writestr("xl/_rels/workbook.xml.rels", _XLSX_WORKBOOK_RELS)
         z.writestr("xl/workbook.xml", _XLSX_WORKBOOK)
         z.writestr("xl/styles.xml", _XLSX_STYLES_XML)
-        z.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml(det_rows, det_widths))
-        z.writestr("xl/worksheets/sheet2.xml", _xlsx_sheet_xml(sum_rows, sum_widths))
+        z.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml(cipher_rows, cipher_widths))
+        z.writestr("xl/worksheets/sheet2.xml", _xlsx_sheet_xml(other_rows, other_widths))
+        z.writestr("xl/worksheets/sheet3.xml", _xlsx_sheet_xml(sum_rows, sum_widths))
     return buf.getvalue()
 
 

@@ -210,6 +210,11 @@ def build_json():
                           ensure_ascii=False, indent=2)
 
 
+def build_xlsx():
+    with LOCK:
+        return tlsscan.xlsx_bytes(STATE["summaries"], STATE["rows"])
+
+
 # --------------------------------------------------------------------------
 # Geçmiş taramalar (yerel diske JSON olarak kaydedilir)
 # --------------------------------------------------------------------------
@@ -318,6 +323,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/export.json":
             self._send(200, build_json(), "application/json; charset=utf-8",
                        {"Content-Disposition": "attachment; filename=tls_results.json"})
+        elif path == "/api/export.xlsx":
+            self._send(200, build_xlsx(),
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       {"Content-Disposition": "attachment; filename=tls_results.xlsx"})
         elif path == "/api/history":
             self._json(200, {"history": list_history()})
         elif path == "/api/history/get":

@@ -259,10 +259,13 @@ Her hedef için tek satır: `target, state, service, tls_versions, cert_cn, cert
 
 ### `tls_results.xlsx`: renkli Excel (`-x/--xlsx`)
 
-CSV'lerin yanına, isteğe bağlı olarak biçimlendirilmiş bir `.xlsx` da yazılır (openpyxl gibi bir pakete gerek yok, sadece stdlib). İki sayfa içerir:
+CSV'lerin yanına, isteğe bağlı olarak biçimlendirilmiş bir `.xlsx` da yazılır (openpyxl gibi bir pakete gerek yok, sadece stdlib). Üç sayfa içerir, her birinde sadece o sayfaya ait sütunlar olacak şekilde (boş sütunlarla şişirmeden):
 
-- **Detay** — `tls_results.csv` ile aynı veriyi, her satır **not rengine** (Güçlü yeşil, Orta mavi, Orta (SHA1) sarı, Zayıf turuncu, Çok Zayıf kırmızı, Deprecated koyu kırmızı/beyaz yazı, Unclassified gri) ya da **⚛ kuantum riski** kategorisindeyse mora boyanmış olarak gösterir. Başlık satırı dondurulmuştur (freeze pane), sütunlar sabit genişliktedir.
+- **Cipher'lar** — sadece `protocol=TLS` satırları (sürüm, cipher, kex grubu…), kendi **Not**/**Gerekçe** sütunlarıyla. Her satır **not rengine** (Güçlü yeşil, Orta mavi, Orta (SHA1) sarı, Zayıf turuncu, Çok Zayıf kırmızı, Deprecated koyu kırmızı/beyaz yazı, Unclassified gri) ya da **⚛ kuantum riski** kategorisindeyse (kex-group) mora boyanmış olarak gösterilir.
+- **Diğer Bulgular** — sertifika, DH, SSH, RDP satırları (`Not`/`Gerekçe` sütunu yok, çünkü sadece cipher'lara uygulanıyor); sertifikanın `public-key`/`signature`, `dh-params` satırları ⚛ mora boyanır.
 - **Özet** — `tls_summary.csv` ile aynı veriyi; süresi dolmuş/self-signed sertifika, DH sorunu ve `weak_count > 0` olan hücreler kırmızı vurgulanır.
+
+Üçünde de başlık satırı dondurulmuştur (freeze pane), sütunlar sabit genişliktedir.
 
 ```bash
 python tlsscan.py -i targets.txt -x                 # tls_results.xlsx
